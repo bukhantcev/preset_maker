@@ -8,6 +8,7 @@ import tempfile
 import io
 import queue
 import multiprocessing
+from zipfile import BadZipFile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -16,7 +17,7 @@ import xml.etree.ElementTree as ET
 try:
     import cv2
     from PIL import Image, ImageTk
-    from openpyxl import Workbook
+    from openpyxl import Workbook, load_workbook
     from openpyxl.drawing.image import Image as XlsxImage
     from openpyxl.styles import Alignment, Font
 except ImportError as exc:
@@ -94,6 +95,68 @@ def natural_key(value: str) -> tuple[int, int | str]:
 def safe_filename(value: str) -> str:
     value = re.sub(r"[^0-9A-Za-zА-Яа-яЁё_.-]+", "_", value, flags=re.UNICODE)
     return value.strip("_") or "photo"
+
+
+def passport_dir_for_xml(xml_path: Path) -> Path:
+    return xml_path.with_suffix("").parent / f"{xml_path.stem}_passport"
+
+
+def find_existing_presets_xlsx(output_dir: Path) -> Optional[Path]:
+    candidates = sorted(path for path in output_dir.glob("*_пресеты.xlsx") if not path.name.startswith("._"))
+    if candidates:
+        return candidates[0]
+    legacy = output_dir / "passport.xlsx"
+    if legacy.exists():
+        return legacy
+    return None
+
+
+def load_existing_passport(items: list[PresetItem], output_dir: Path, default_title: str) -> tuple[str, list[PassportRow], Optional[str]]:
+    xlsx_path = find_existing_presets_xlsx(output_dir)
+    title = default_title
+    descriptions: dict[tuple[str, str], str] = {}
+    warning = None
+
+    if xlsx_path is not None:
+        try:
+            workbook = load_workbook(xlsx_path, data_only=True)
+            sheet = workbook.active
+            if sheet["A1"].value:
+                title = str(sheet["A1"].value)
+            descriptions = read_descriptions_from_sheet(sheet)
+        except (BadZipFile, OSError, ValueError) as exc:
+            warning = f"Не удалось прочитать таблицу {xlsx_path.name}: {exc}"
+
+    photos_dir = output_dir / "photos"
+    rows: list[PassportRow] = []
+    for item in items:
+        photo_path = find_photo_for_item(item, photos_dir)
+        description = descriptions.get((item.preset_label, item.fixture_id), "")
+        rows.append(PassportRow(item.preset_label, item.fixture_id, photo_path, description))
+    return title, rows, warning
+
+
+def read_descriptions_from_sheet(sheet) -> dict[tuple[str, str], str]:
+    header_row = 2 if sheet.max_row >= 2 and sheet.cell(2, 1).value == "Пресет" else 1
+    if sheet.cell(header_row, 1).value != "Пресет":
+        return {}
+    descriptions: dict[tuple[str, str], str] = {}
+    for row in sheet.iter_rows(min_row=header_row + 1, values_only=True):
+        preset, fixture, _photo, description = (list(row) + [None, None, None, None])[:4]
+        if preset is None or fixture is None:
+            continue
+        descriptions[(str(preset), str(fixture))] = "" if description is None else str(description)
+    return descriptions
+
+
+def find_photo_for_item(item: PresetItem, photos_dir: Path) -> Optional[Path]:
+    if not photos_dir.exists():
+        return None
+    exact = photos_dir / f"{item.file_stem}.jpg"
+    if exact.exists():
+        return exact
+    matches = sorted(photos_dir.glob(f"{item.file_stem}_*.jpg"))
+    return matches[0] if matches else None
 
 
 def parse_grandma2_presets(xml_path: Path) -> list[PresetItem]:
@@ -416,40 +479,64 @@ class PassportApp(tk.Tk):
             messagebox.showwarning(APP_TITLE, "В файле не нашлось пресетов с приборами.")
             return
 
-        show_title = simpledialog.askstring(
-            APP_TITLE,
-            "Название спектакля:",
-            initialvalue=path.stem,
-            parent=self,
-        )
-        if show_title is None:
-            return
+        output_dir = passport_dir_for_xml(path)
+        is_existing_project = output_dir.exists()
+        load_warning = None
+        if is_existing_project:
+            show_title, rows, load_warning = load_existing_passport(items, output_dir, path.stem)
+        else:
+            show_title = simpledialog.askstring(
+                APP_TITLE,
+                "Название спектакля:",
+                initialvalue=path.stem,
+                parent=self,
+            )
+            if show_title is None:
+                return
+            show_title = show_title.strip() or path.stem
+            rows = [PassportRow(item.preset_label, item.fixture_id, None, "") for item in items]
 
         self.xml_path = path
-        self.show_title = show_title.strip() or path.stem
+        self.show_title = show_title
         self.items = items
-        self.rows = [PassportRow(item.preset_label, item.fixture_id, None, "") for item in items]
+        self.rows = rows
         self.index = 0
         self.workflow_running = False
         self.reviewing_photo = False
         self.clear_description()
-        self.output_dir = path.with_suffix("").parent / f"{path.stem}_passport"
+        self.output_dir = output_dir
         self.photos_dir = self.output_dir / "photos"
         self.photos_dir.mkdir(parents=True, exist_ok=True)
         self.refresh_table()
+        for row_index in range(len(self.rows)):
+            self.mark_table_row(row_index)
         presets_count = len({(item.preset_no, item.preset_name) for item in items})
         self.summary_var.set(f"{path.name}: пресетов {presets_count}, строк с приборами {len(items)}")
-        self.current_var.set("Файл загружен. Нажмите «Начать».")
-        self.progress_var.set(f"0 / {len(items)}")
+        self.current_var.set("Проект открыт для редактирования." if is_existing_project else "Файл загружен. Нажмите «Начать».")
+        self.update_progress()
         self.start_button.configure(text="Начать", command=self.toggle_workflow, state="normal")
         self.export_button.configure(state="normal")
         self.partitura_button.configure(state="normal")
-        messagebox.showinfo(
-            APP_TITLE,
-            f"Найдено пресетов: {presets_count}\n"
-            f"Приборов в пресетах: {len(items)}\n\n"
-            "Можно начинать проход."
-        )
+        if is_existing_project:
+            loaded_photos = sum(1 for row in self.rows if row.photo_path and row.photo_path.exists())
+            loaded_descriptions = sum(1 for row in self.rows if row.description)
+            warning_text = f"\n\n{load_warning}" if load_warning else ""
+            messagebox.showinfo(
+                APP_TITLE,
+                f"Открыт существующий паспорт:\n{self.output_dir}\n\n"
+                f"Пресетов: {presets_count}\n"
+                f"Строк с приборами: {len(items)}\n"
+                f"Фото загружено: {loaded_photos}\n"
+                f"Описаний загружено: {loaded_descriptions}"
+                f"{warning_text}"
+            )
+        else:
+            messagebox.showinfo(
+                APP_TITLE,
+                f"Найдено пресетов: {presets_count}\n"
+                f"Приборов в пресетах: {len(items)}\n\n"
+                "Можно начинать проход."
+            )
 
     def toggle_workflow(self) -> None:
         if self.workflow_running:

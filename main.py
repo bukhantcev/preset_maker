@@ -1112,6 +1112,7 @@ def print_camera_check() -> None:
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     if len(sys.argv) == 3 and sys.argv[1] == "--check":
         print_xml_summary(Path(sys.argv[2]))
     elif len(sys.argv) == 2 and sys.argv[1] == "--camera-check":

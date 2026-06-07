@@ -114,7 +114,7 @@ def find_existing_presets_xlsx(output_dir: Path) -> Optional[Path]:
 def load_existing_passport(items: list[PresetItem], output_dir: Path, default_title: str) -> tuple[str, list[PassportRow], Optional[str]]:
     xlsx_path = find_existing_presets_xlsx(output_dir)
     title = default_title
-    descriptions: dict[tuple[str, str], str] = {}
+    saved_rows: list[tuple[str, str, str]] = []
     warning = None
 
     if xlsx_path is not None:
@@ -123,30 +123,33 @@ def load_existing_passport(items: list[PresetItem], output_dir: Path, default_ti
             sheet = workbook.active
             if sheet["A1"].value:
                 title = str(sheet["A1"].value)
-            descriptions = read_descriptions_from_sheet(sheet)
+            saved_rows = read_passport_rows_from_sheet(sheet)
         except (BadZipFile, OSError, ValueError) as exc:
             warning = f"Не удалось прочитать таблицу {xlsx_path.name}: {exc}"
 
     photos_dir = output_dir / "photos"
     rows: list[PassportRow] = []
-    for item in items:
+    for index, item in enumerate(items):
         photo_path = find_photo_for_item(item, photos_dir)
-        description = descriptions.get((item.preset_label, item.fixture_id), "")
-        rows.append(PassportRow(item.preset_label, item.fixture_id, photo_path, description))
+        if index < len(saved_rows):
+            preset_label, fixture_id, description = saved_rows[index]
+        else:
+            preset_label, fixture_id, description = item.preset_label, item.fixture_id, ""
+        rows.append(PassportRow(preset_label, fixture_id, photo_path, description))
     return title, rows, warning
 
 
-def read_descriptions_from_sheet(sheet) -> dict[tuple[str, str], str]:
+def read_passport_rows_from_sheet(sheet) -> list[tuple[str, str, str]]:
     header_row = 2 if sheet.max_row >= 2 and sheet.cell(2, 1).value == "Пресет" else 1
     if sheet.cell(header_row, 1).value != "Пресет":
-        return {}
-    descriptions: dict[tuple[str, str], str] = {}
+        return []
+    rows: list[tuple[str, str, str]] = []
     for row in sheet.iter_rows(min_row=header_row + 1, values_only=True):
         preset, fixture, _photo, description = (list(row) + [None, None, None, None])[:4]
         if preset is None or fixture is None:
             continue
-        descriptions[(str(preset), str(fixture))] = "" if description is None else str(description)
-    return descriptions
+        rows.append((str(preset), str(fixture), "" if description is None else str(description)))
+    return rows
 
 
 def find_photo_for_item(item: PresetItem, photos_dir: Path) -> Optional[Path]:
@@ -696,10 +699,9 @@ class PassportApp(tk.Tk):
         if self.index >= len(self.items):
             self.finish_workflow()
             return
-        item = self.items[self.index]
         row = self.rows[self.index]
         self.current_var.set(
-            f"{self.index + 1}/{len(self.items)}  Пресет: {item.preset_label}   Прибор: {item.fixture_id}"
+            f"{self.index + 1}/{len(self.items)}  Пресет: {row.preset_label}   Прибор: {row.fixture_id}"
         )
         self.update_progress()
         self.syncing_selection = True
@@ -738,13 +740,14 @@ class PassportApp(tk.Tk):
         if self.captured_temp is None or self.photos_dir is None:
             return
         item = self.items[self.index]
+        current_row = self.rows[self.index]
         target = self.unique_photo_path(item.file_stem)
-        self.delete_photo_file(self.rows[self.index].photo_path)
+        self.delete_photo_file(current_row.photo_path)
         shutil.move(str(self.captured_temp), target)
         self.captured_temp = None
         self.reviewing_photo = False
         description = self.get_description()
-        self.rows[self.index] = PassportRow(item.preset_label, item.fixture_id, target, description)
+        self.rows[self.index] = PassportRow(current_row.preset_label, current_row.fixture_id, target, description)
         self.mark_table_row(self.index)
         self.index = self.next_index_after_save()
         self.show_current_item()
@@ -759,10 +762,10 @@ class PassportApp(tk.Tk):
         self.hide_review_buttons()
 
     def skip_item(self) -> None:
-        item = self.items[self.index]
+        current_row = self.rows[self.index]
         description = self.get_description()
-        self.delete_photo_file(self.rows[self.index].photo_path)
-        self.rows[self.index] = PassportRow(item.preset_label, item.fixture_id, None, description, True)
+        self.delete_photo_file(current_row.photo_path)
+        self.rows[self.index] = PassportRow(current_row.preset_label, current_row.fixture_id, None, description, True)
         self.mark_table_row(self.index)
         self.index = self.next_index_after_save()
         self.show_current_item()
@@ -802,18 +805,17 @@ class PassportApp(tk.Tk):
 
     def refresh_table(self) -> None:
         self.table.delete(*self.table.get_children())
-        for i, item in enumerate(self.items):
-            self.table.insert("", "end", iid=str(i), values=(item.preset_label, item.fixture_id, ""))
+        for i, row in enumerate(self.rows):
+            self.table.insert("", "end", iid=str(i), values=(row.preset_label, row.fixture_id, ""))
 
     def mark_table_row(self, row_index: int) -> None:
-        item = self.items[row_index]
         row = self.rows[row_index]
         description = row.description
         if row.photo_path and row.photo_path.exists():
             description = f"фото {description}" if description else "фото"
         elif row.skipped:
             description = f"пропуск {description}" if description else "пропуск"
-        self.table.item(str(row_index), values=(item.preset_label, item.fixture_id, description))
+        self.table.item(str(row_index), values=(row.preset_label, row.fixture_id, description))
 
     def get_description(self) -> str:
         return self.description_text.get("1.0", "end").strip()
@@ -890,9 +892,9 @@ class PassportApp(tk.Tk):
     def delete_selected_result(self) -> None:
         if not self.rows:
             return
-        self.delete_photo_file(self.rows[self.index].photo_path)
-        item = self.items[self.index]
-        self.rows[self.index] = PassportRow(item.preset_label, item.fixture_id, None, "")
+        current_row = self.rows[self.index]
+        self.delete_photo_file(current_row.photo_path)
+        self.rows[self.index] = PassportRow(current_row.preset_label, current_row.fixture_id, None, "")
         self.mark_table_row(self.index)
         self.load_description("")
         self.reviewing_photo = False

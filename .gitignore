@@ -1,0 +1,36 @@
+# macOS / editors
+.DS_Store
+.idea/
+*.xcuserstate
+xcuserdata/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.venv_x86/
+
+# PyInstaller / desktop builds
+build/
+dist/
+*.log
+
+# Android local/build files
+android_app/.gradle/
+android_app/app/build/
+android_app/build/
+android_app/local.properties
+
+# iOS/Xcode generated files
+DerivedData/
+*.xcarchive/
+ios_app/GrandMA2Passport/GrandMA2Passport.xcodeproj/project.xcworkspace/xcuserdata/
+ios_app/GrandMA2Passport/GrandMA2Passport.xcodeproj/xcuserdata/
+
+# Release artifacts
+release_preset_maker/*.apk
+release_preset_maker/*.zip
+release_preset_maker/*.app/
+release_preset_maker/ios_archive/
+release_preset_maker/ios_export/
+

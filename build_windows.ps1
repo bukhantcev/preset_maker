@@ -15,8 +15,8 @@ if (Test-Path "dist") { Remove-Item -Recurse -Force "dist" }
 .\\.venv_win\\Scripts\\pyinstaller.exe --clean --noconfirm preset_maker_windows.spec
 
 New-Item -ItemType Directory -Force -Path "release_preset_maker" | Out-Null
-Copy-Item "dist\\GrandMA2 Passport.exe" "release_preset_maker\\GrandMA2 Passport-windows.exe" -Force
+Copy-Item "dist\\Passport creator.exe" "release_preset_maker\\Passport creator-windows.exe" -Force
 
-Compress-Archive -Path "release_preset_maker\\GrandMA2 Passport-windows.exe" -DestinationPath "release_preset_maker\\GrandMA2 Passport-windows.zip" -Force
+Compress-Archive -Path "release_preset_maker\\Passport creator-windows.exe" -DestinationPath "release_preset_maker\\Passport creator-windows.zip" -Force
 
-Write-Host "Built release_preset_maker\\GrandMA2 Passport-windows.zip"
+Write-Host "Built release_preset_maker\\Passport creator-windows.zip"

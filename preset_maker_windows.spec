@@ -3,10 +3,16 @@
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 
-APP_NAME = "GrandMA2 Passport"
+APP_NAME = "Passport creator"
 
-datas = collect_data_files("cv2")
-hiddenimports = collect_submodules("openpyxl") + collect_submodules("PIL")
+datas = collect_data_files("cv2") + collect_data_files("reportlab")
+hiddenimports = collect_submodules("openpyxl") + collect_submodules("PIL") + collect_submodules("reportlab")
+datas += [
+    (
+        "ios_app/GrandMA2Passport/GrandMA2Passport/Assets.xcassets/Logo.imageset/logoPC.png",
+        "ios_app/GrandMA2Passport/GrandMA2Passport/Assets.xcassets/Logo.imageset",
+    )
+]
 
 
 a = Analysis(

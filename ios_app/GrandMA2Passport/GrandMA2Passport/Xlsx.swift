@@ -174,16 +174,35 @@ enum Xlsx {
         xml += row(2, cell("A2", "Пресет", 2) + cell("B2", "Прибор", 2) + cell("C2", "Фото", 2) + cell("D2", "Описание", 2))
         for (i, r) in rows.enumerated() {
             let rowNo = i + 3
+            let sameAsPrevious = i > 0 && sameGroup(r, rows[i - 1])
             xml += row(rowNo,
-                       cell("A\(rowNo)", r.presetLabel, 3) +
-                       cell("B\(rowNo)", r.fixtureId, 3) +
+                       cell("A\(rowNo)", sameAsPrevious ? "" : r.presetLabel, 3) +
+                       cell("B\(rowNo)", sameAsPrevious ? "" : r.fixtureId, 3) +
                        cell("C\(rowNo)", "", 3) +
                        cell("D\(rowNo)", r.description, 4),
-                       height: 96)
+                       height: 138)
         }
-        xml += "</sheetData><mergeCells count=\"1\"><mergeCell ref=\"A1:D1\"/></mergeCells>"
+        var merges = ["A1:D1"]
+        var start = 0
+        while start < rows.count {
+            var end = start
+            while end + 1 < rows.count && sameGroup(rows[start], rows[end + 1]) { end += 1 }
+            if end > start {
+                merges.append("A\(start + 3):A\(end + 3)")
+                merges.append("B\(start + 3):B\(end + 3)")
+            }
+            start = end + 1
+        }
+        xml += "</sheetData><mergeCells count=\"\(merges.count)\">"
+        for merge in merges { xml += "<mergeCell ref=\"\(merge)\"/>" }
+        xml += "</mergeCells>"
         xml += "<drawing r:id=\"rId1\"/></worksheet>"
         return xml
+    }
+
+    private static func sameGroup(_ a: PassportRow, _ b: PassportRow) -> Bool {
+        a.presetLabel.trimmingCharacters(in: .whitespacesAndNewlines) == b.presetLabel.trimmingCharacters(in: .whitespacesAndNewlines) &&
+        a.fixtureId.trimmingCharacters(in: .whitespacesAndNewlines) == b.fixtureId.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func partSheet(title: String, rows: [PartRow], fields: [PartituraField]) -> String {
@@ -208,7 +227,7 @@ enum Xlsx {
         return xml
     }
 
-    private static func sheetOpen(cols: String = "<cols><col min=\"1\" max=\"1\" width=\"42\" customWidth=\"1\"/><col min=\"2\" max=\"2\" width=\"14\" customWidth=\"1\"/><col min=\"3\" max=\"3\" width=\"42\" customWidth=\"1\"/><col min=\"4\" max=\"20\" width=\"28\" customWidth=\"1\"/></cols>") -> String {
+    private static func sheetOpen(cols: String = "<cols><col min=\"1\" max=\"1\" width=\"38\" customWidth=\"1\"/><col min=\"2\" max=\"2\" width=\"12\" customWidth=\"1\"/><col min=\"3\" max=\"3\" width=\"42\" customWidth=\"1\"/><col min=\"4\" max=\"4\" width=\"34\" customWidth=\"1\"/></cols>") -> String {
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheetViews><sheetView workbookViewId=\"0\"/></sheetViews>\(cols)"
     }
 
@@ -224,12 +243,13 @@ enum Xlsx {
     private static func partColumnWidth(_ id: String) -> String {
         switch id {
         case "number": return "12"
-        case "name": return "46"
+        case "name": return "48"
         case "trigger": return "13"
         case "trigger_time": return "15"
-        case "fade", "downfade", "delay": return "10"
-        case "info": return "50"
-        case "command": return "30"
+        case "fade", "delay": return "10"
+        case "downfade": return "12"
+        case "info": return "54"
+        case "command": return "32"
         default: return "18"
         }
     }
@@ -281,7 +301,7 @@ enum Xlsx {
         var img = 1
         for (i, row) in rows.enumerated() where row.photoName != nil {
             let r = i + 2
-            xml += "<xdr:twoCellAnchor><xdr:from><xdr:col>2</xdr:col><xdr:colOff>120000</xdr:colOff><xdr:row>\(r)</xdr:row><xdr:rowOff>90000</xdr:rowOff></xdr:from><xdr:to><xdr:col>3</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>\(r + 1)</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:pic><xdr:nvPicPr><xdr:cNvPr id=\"\(img)\" name=\"image\(img)\"/><xdr:cNvPicPr/></xdr:nvPicPr><xdr:blipFill><a:blip r:embed=\"rId\(img)\"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill><xdr:spPr><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic><xdr:clientData/></xdr:twoCellAnchor>"
+            xml += "<xdr:twoCellAnchor editAs=\"oneCell\"><xdr:from><xdr:col>2</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>\(r)</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>3</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>\(r + 1)</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:pic><xdr:nvPicPr><xdr:cNvPr id=\"\(img)\" name=\"image\(img)\"/><xdr:cNvPicPr><a:picLocks noChangeAspect=\"1\"/></xdr:cNvPicPr></xdr:nvPicPr><xdr:blipFill><a:blip r:embed=\"rId\(img)\"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill><xdr:spPr><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic><xdr:clientData/></xdr:twoCellAnchor>"
             img += 1
         }
         return xml + "</xdr:wsDr>"

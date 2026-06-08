@@ -1927,11 +1927,20 @@ public class MainActivity extends ComponentActivity {
 
         int pageWidth = 842;
         int pageHeight = 595;
-        int margin = 24;
-        int rowHeight = 112;
-        int headerHeight = 48;
+        int margin = 34;
+        int rowHeight = 116;
+        int headerHeight = 54;
         int rowsPerPage = Math.max(1, (pageHeight - margin * 2 - headerHeight) / rowHeight);
         int pageCount = Math.max(1, (int) Math.ceil(passportRows.size() / (double) rowsPerPage));
+        int colPreset = margin;
+        int presetWidth = 176;
+        int colFixture = colPreset + presetWidth;
+        int fixtureWidth = 62;
+        int colPhoto = colFixture + fixtureWidth;
+        int photoWidth = 198;
+        int colDesc = colPhoto + photoWidth;
+        int descWidth = 255;
+        int tableWidth = presetWidth + fixtureWidth + photoWidth + descWidth;
 
         for (int page = 0; page < pageCount; page++) {
             PdfDocument.PageInfo info = new PdfDocument.PageInfo.Builder(pageWidth, pageHeight, page + 1).create();
@@ -1941,40 +1950,48 @@ public class MainActivity extends ComponentActivity {
 
             text.setTextSize(10);
             bold.setTextSize(15);
-            canvas.drawText(title, margin, margin + 14, bold);
+            canvas.drawText(title, margin, margin + 16, bold);
             bold.setTextSize(10);
-            int y = margin + 34;
-            int colPreset = margin;
-            int colFixture = 260;
-            int colPhoto = 330;
-            int colDesc = 560;
-            canvas.drawText("Пресет", colPreset, y, bold);
-            canvas.drawText("Прибор", colFixture, y, bold);
-            canvas.drawText("Фото", colPhoto, y, bold);
-            canvas.drawText("Описание", colDesc, y, bold);
-            canvas.drawLine(margin, y + 8, pageWidth - margin, y + 8, line);
+            int headerTop = margin + 28;
+            int headerBottom = headerTop + 24;
+            canvas.drawRect(colPreset, headerTop, colPreset + presetWidth, headerBottom, line);
+            canvas.drawRect(colFixture, headerTop, colFixture + fixtureWidth, headerBottom, line);
+            canvas.drawRect(colPhoto, headerTop, colPhoto + photoWidth, headerBottom, line);
+            canvas.drawRect(colDesc, headerTop, colDesc + descWidth, headerBottom, line);
+            drawPdfLine(canvas, "Пресет", colPreset, headerTop + 16, presetWidth, bold, true);
+            drawPdfLine(canvas, "Прибор", colFixture, headerTop + 16, fixtureWidth, bold, true);
+            drawPdfLine(canvas, "Фото", colPhoto, headerTop + 16, photoWidth, bold, true);
+            drawPdfLine(canvas, "Описание", colDesc, headerTop + 16, descWidth, bold, true);
 
             for (int i = 0; i < rowsPerPage; i++) {
                 int rowIndex = page * rowsPerPage + i;
                 if (rowIndex >= passportRows.size()) break;
                 PassportRow row = passportRows.get(rowIndex);
-                boolean sameAsPrevious = rowIndex > 0
-                        && row.presetLabel.trim().equals(passportRows.get(rowIndex - 1).presetLabel.trim())
-                        && row.fixtureId.trim().equals(passportRows.get(rowIndex - 1).fixtureId.trim());
                 int top = margin + headerHeight + i * rowHeight;
+                int bottom = top + rowHeight;
                 int base = top + 18;
-
-                canvas.drawLine(margin, top, pageWidth - margin, top, line);
-                if (!sameAsPrevious) {
-                    drawWrappedText(canvas, row.presetLabel, colPreset, base, 220, text, 4);
-                    canvas.drawText(row.fixtureId, colFixture, base, text);
+                int groupStart = rowIndex;
+                while (groupStart > 0 && samePassportPdfGroup(passportRows.get(groupStart), passportRows.get(groupStart - 1))) groupStart--;
+                int groupEnd = rowIndex;
+                while (groupEnd + 1 < passportRows.size() && samePassportPdfGroup(passportRows.get(groupEnd), passportRows.get(groupEnd + 1))) groupEnd++;
+                int pageStart = page * rowsPerPage;
+                int pageEnd = Math.min(passportRows.size() - 1, pageStart + rowsPerPage - 1);
+                boolean firstInPageGroup = rowIndex == Math.max(groupStart, pageStart);
+                if (firstInPageGroup) {
+                    int spanRows = Math.min(groupEnd, pageEnd) - rowIndex + 1;
+                    canvas.drawRect(colPreset, top, colPreset + presetWidth, top + spanRows * rowHeight, line);
+                    canvas.drawRect(colFixture, top, colFixture + fixtureWidth, top + spanRows * rowHeight, line);
+                    drawWrappedTextCentered(canvas, row.presetLabel, colPreset + 4, top, presetWidth - 8, spanRows * rowHeight, text, 6);
+                    drawPdfLine(canvas, row.fixtureId, colFixture + 3, base, fixtureWidth - 6, text, true);
                 }
-                drawWrappedText(canvas, row.description == null ? "" : row.description, colDesc, base, 250, text, 4);
+                canvas.drawRect(colPhoto, top, colPhoto + photoWidth, bottom, line);
+                canvas.drawRect(colDesc, top, colDesc + descWidth, bottom, line);
+                drawWrappedText(canvas, row.description == null ? "" : row.description, colDesc + 4, base, descWidth - 8, text, 5);
 
                 if (row.photoFile != null && row.photoFile.exists()) {
-                    Bitmap bitmap = loadPdfBitmap(row.photoFile, 210, 92);
+                    Bitmap bitmap = loadPdfBitmap(row.photoFile, 181, 108);
                     if (bitmap != null) {
-                        Rect dst = fitRect(bitmap.getWidth(), bitmap.getHeight(), colPhoto, top + 8, 210, 92);
+                        Rect dst = fitRect(bitmap.getWidth(), bitmap.getHeight(), colPhoto + 8, top + 4, 181, 108);
                         canvas.drawBitmap(bitmap, null, dst, null);
                         bitmap.recycle();
                     }
@@ -1991,25 +2008,58 @@ public class MainActivity extends ComponentActivity {
         }
     }
 
+    private boolean samePassportPdfGroup(PassportRow a, PassportRow b) {
+        if (a == null || b == null) return false;
+        return cleanPdfText(a.presetLabel).equals(cleanPdfText(b.presetLabel)) && cleanPdfText(a.fixtureId).equals(cleanPdfText(b.fixtureId));
+    }
+
+    private String cleanPdfText(String value) {
+        return value == null ? "" : value.trim();
+    }
+
     private void drawWrappedText(Canvas canvas, String value, int x, int y, int width, Paint paint, int maxLines) {
         if (value == null) return;
+        List<String> lines = wrappedLines(value, width, paint, maxLines);
+        for (int i = 0; i < lines.size(); i++) {
+            canvas.drawText(lines.get(i), x, y + i * 13, paint);
+        }
+    }
+
+    private void drawWrappedTextCentered(Canvas canvas, String value, int x, int top, int width, int height, Paint paint, int maxLines) {
+        if (value == null) return;
+        List<String> lines = wrappedLines(value, width, paint, maxLines);
+        if (lines.isEmpty()) return;
+        int lineHeight = 13;
+        Paint.FontMetrics metrics = paint.getFontMetrics();
+        float textBlockHeight = (lines.size() - 1) * lineHeight + (metrics.descent - metrics.ascent);
+        float firstBaseline = top + (height - textBlockHeight) / 2f - metrics.ascent;
+        for (int i = 0; i < lines.size(); i++) {
+            String lineText = lines.get(i);
+            float dx = Math.max(0, (width - paint.measureText(lineText)) / 2f);
+            canvas.drawText(lineText, x + dx, firstBaseline + i * lineHeight, paint);
+        }
+    }
+
+    private List<String> wrappedLines(String value, int width, Paint paint, int maxLines) {
+        ArrayList<String> lines = new ArrayList<>();
+        if (value == null) return lines;
         String[] words = value.split("\\s+");
         StringBuilder lineText = new StringBuilder();
-        int lineNo = 0;
         for (String word : words) {
+            if (word.isEmpty()) continue;
             String next = lineText.length() == 0 ? word : lineText + " " + word;
             if (paint.measureText(next) > width && lineText.length() > 0) {
-                canvas.drawText(lineText.toString(), x, y + lineNo * 13, paint);
-                lineNo++;
+                lines.add(lineText.toString());
                 lineText = new StringBuilder(word);
-                if (lineNo >= maxLines) return;
+                if (lines.size() >= maxLines) return lines;
             } else {
                 lineText = new StringBuilder(next);
             }
         }
-        if (lineText.length() > 0 && lineNo < maxLines) {
-            canvas.drawText(lineText.toString(), x, y + lineNo * 13, paint);
+        if (lineText.length() > 0 && lines.size() < maxLines) {
+            lines.add(lineText.toString());
         }
+        return lines;
     }
 
     private Bitmap loadPdfBitmap(File file, int maxWidth, int maxHeight) {
@@ -2329,7 +2379,7 @@ public class MainActivity extends ComponentActivity {
             Canvas canvas = pdfPage.getCanvas();
             canvas.drawColor(Color.WHITE);
             bold.setTextSize(14);
-            canvas.drawText(title + " - партитура", margin, margin + 14, bold);
+            canvas.drawText(title, margin, margin + 14, bold);
 
             bold.setTextSize(8);
             int headerTop = margin + 30;
@@ -2912,7 +2962,7 @@ public class MainActivity extends ComponentActivity {
             for (int i = 0; i < rows.size(); i++) {
                 PassportRow row = rows.get(i);
                 boolean sameAsPrevious = i > 0 && sameGroup(row, rows.get(i - 1));
-                b.append("<row r=\"").append(r).append("\" ht=\"145\" customHeight=\"1\">")
+                b.append("<row r=\"").append(r).append("\" ht=\"138\" customHeight=\"1\">")
                         .append(cell("A" + r, sameAsPrevious ? "" : row.presetLabel, 3))
                         .append(cell("B" + r, sameAsPrevious ? "" : row.fixtureId, 3))
                         .append(cell("C" + r, "", 3))
@@ -2976,7 +3026,16 @@ public class MainActivity extends ComponentActivity {
             StringBuilder b = new StringBuilder("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheetViews><sheetView workbookViewId=\"0\"/></sheetViews><cols>");
             for (int i = 0; i < fields.size(); i++) {
                 String id = fields.get(i).id;
-                int width = ("name".equals(id) || "info".equals(id)) ? 54 : ("number".equals(id) ? 12 : 16);
+                int width;
+                if ("number".equals(id)) width = 12;
+                else if ("name".equals(id)) width = 48;
+                else if ("trigger".equals(id)) width = 13;
+                else if ("trigger_time".equals(id)) width = 15;
+                else if ("fade".equals(id) || "delay".equals(id)) width = 10;
+                else if ("downfade".equals(id)) width = 12;
+                else if ("info".equals(id)) width = 54;
+                else if ("command".equals(id)) width = 32;
+                else width = 18;
                 b.append("<col min=\"").append(i + 1).append("\" max=\"").append(i + 1).append("\" width=\"").append(width).append("\" customWidth=\"1\"/>");
             }
             return b.append("</cols>").toString();
@@ -3029,7 +3088,7 @@ public class MainActivity extends ComponentActivity {
         }
 
         static String sheetOpen() {
-            return "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheetViews><sheetView workbookViewId=\"0\"/></sheetViews><cols><col min=\"1\" max=\"1\" width=\"42\" customWidth=\"1\"/><col min=\"2\" max=\"2\" width=\"12\" customWidth=\"1\"/><col min=\"3\" max=\"3\" width=\"42\" customWidth=\"1\"/><col min=\"4\" max=\"4\" width=\"24\" customWidth=\"1\"/></cols>";
+            return "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheetViews><sheetView workbookViewId=\"0\"/></sheetViews><cols><col min=\"1\" max=\"1\" width=\"38\" customWidth=\"1\"/><col min=\"2\" max=\"2\" width=\"12\" customWidth=\"1\"/><col min=\"3\" max=\"3\" width=\"42\" customWidth=\"1\"/><col min=\"4\" max=\"4\" width=\"34\" customWidth=\"1\"/></cols>";
         }
 
         static String cell(String ref, String text) {

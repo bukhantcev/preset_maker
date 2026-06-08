@@ -3,10 +3,16 @@
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 
-APP_NAME = "GrandMA2 Passport"
+APP_NAME = "Passport creator"
 
-datas = collect_data_files("cv2")
-hiddenimports = collect_submodules("openpyxl") + collect_submodules("PIL")
+datas = collect_data_files("cv2") + collect_data_files("reportlab")
+hiddenimports = collect_submodules("openpyxl") + collect_submodules("PIL") + collect_submodules("reportlab")
+datas += [
+    (
+        "ios_app/GrandMA2Passport/GrandMA2Passport/Assets.xcassets/Logo.imageset/logoPC.png",
+        "ios_app/GrandMA2Passport/GrandMA2Passport/Assets.xcassets/Logo.imageset",
+    )
+]
 
 
 a = Analysis(
@@ -54,7 +60,7 @@ app = BUNDLE(
     coll,
     name=f"{APP_NAME}.app",
     icon=None,
-    bundle_identifier="com.buha.grandma2-passport",
+    bundle_identifier="com.buha.passport-creator",
     info_plist={
         "NSCameraUsageDescription": "Нужен доступ к камере для фотографирования света приборов.",
         "NSHighResolutionCapable": True,

@@ -15,8 +15,22 @@ if (Test-Path "dist") { Remove-Item -Recurse -Force "dist" }
 .\\.venv_win\\Scripts\\pyinstaller.exe --clean --noconfirm preset_maker_windows.spec
 
 New-Item -ItemType Directory -Force -Path "release_preset_maker" | Out-Null
-Copy-Item "dist\\Passport creator.exe" "release_preset_maker\\Passport creator-windows.exe" -Force
+$exe = "dist\\Passport creator.exe"
+$releaseExe = "release_preset_maker\\Passport creator-windows.exe"
+$releaseZip = "release_preset_maker\\Passport creator-windows.zip"
+$oldReleaseExe = "release_preset_maker\\GrandMA2 Passport-windows.exe"
+$oldReleaseZip = "release_preset_maker\\GrandMA2 Passport-windows.zip"
 
-Compress-Archive -Path "release_preset_maker\\Passport creator-windows.exe" -DestinationPath "release_preset_maker\\Passport creator-windows.zip" -Force
+if (!(Test-Path $exe)) {
+    throw "PyInstaller finished, but $exe was not created"
+}
 
-Write-Host "Built release_preset_maker\\Passport creator-windows.zip"
+if (Test-Path $releaseExe) { Remove-Item -Force $releaseExe }
+if (Test-Path $releaseZip) { Remove-Item -Force $releaseZip }
+if (Test-Path $oldReleaseExe) { Remove-Item -Force $oldReleaseExe }
+if (Test-Path $oldReleaseZip) { Remove-Item -Force $oldReleaseZip }
+
+Copy-Item $exe $releaseExe -Force
+Compress-Archive -Path $releaseExe -DestinationPath $releaseZip -Force
+
+Write-Host "Built $releaseZip"

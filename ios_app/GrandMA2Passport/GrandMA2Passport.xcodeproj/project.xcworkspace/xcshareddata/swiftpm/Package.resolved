@@ -1,0 +1,24 @@
+{
+  "originHash" : "1092da7babe3779ec7e7623227fba3cdf0b12e5c0673257898e9d4f9164c5f42",
+  "pins" : [
+    {
+      "identity" : "pathworks",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/RuiNelson/PathWorks.git",
+      "state" : {
+        "revision" : "1892d7c5148bac69c4d48e99b4454cd1010da08c",
+        "version" : "2.0.0"
+      }
+    },
+    {
+      "identity" : "swiftsftp",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/RuiNelson/SwiftSFTP.git",
+      "state" : {
+        "revision" : "ed5be08a39af9130b6159fd81fe000b0e426e114",
+        "version" : "1.0.2"
+      }
+    }
+  ],
+  "version" : 3
+}

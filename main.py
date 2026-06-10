@@ -6,18 +6,22 @@ import os
 import queue
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 from zipfile import BadZipFile
+import json
 import xml.etree.ElementTree as ET
 
 try:
     import cv2
+    import paramiko
     from PIL import Image, ImageDraw, ImageFont, ImageTk
     from openpyxl import Workbook, load_workbook
     from openpyxl.drawing.image import Image as XlsxImage
@@ -39,6 +43,11 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 
 APP_TITLE = "Passport creator"
 PROJECT_ROOT = Path.home() / "Documents" / "MA2_passports"
+APP_DATA_DIR = Path.home() / ".passport_creator"
+REMOTE_CACHE_ROOT = APP_DATA_DIR / "remote_cache" / "MA2_passports"
+CONFIG_PATH = APP_DATA_DIR / "cloud_connection.json"
+ACTIVE_PROJECT_ROOT = PROJECT_ROOT
+REMOTE_PROJECT_ROOT_NAME = "MA2_passports"
 PHOTO_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".heic", ".heif"}
 XML_EXTENSIONS = {".xml"}
 
@@ -49,6 +58,7 @@ YELLOW = "#ffb800"
 SILVER = "#cfcfcf"
 MUTED = "#9c9c9c"
 RED = "#ff4545"
+GREEN = "#4ee06d"
 
 
 @dataclass(frozen=True)
@@ -123,6 +133,22 @@ class Project:
     xml_path: Path
 
 
+@dataclass
+class SftpConfig:
+    host: str = ""
+    port: int = 22
+    username: str = ""
+    password: str = ""
+    remote_dir: str = REMOTE_PROJECT_ROOT_NAME
+
+
+@dataclass(frozen=True)
+class RemoteFile:
+    remote_path: str
+    relative_path: Path
+    size: int = 0
+
+
 PARTITURA_DEFAULT_FIELDS = [
     PartituraField("number", "Номер", True),
     PartituraField("name", "Реплика", True),
@@ -169,16 +195,30 @@ def safe_filename(value: str) -> str:
     return value or "show"
 
 
+def set_active_project_root(path: Path) -> None:
+    global ACTIVE_PROJECT_ROOT
+    ACTIVE_PROJECT_ROOT = path
+
+
+def active_project_root() -> Path:
+    return ACTIVE_PROJECT_ROOT
+
+
 def project_dir_for_title(title: str) -> Path:
-    return PROJECT_ROOT / safe_filename(title)
+    return active_project_root() / safe_filename(title)
 
 
 def display_title(value: str) -> str:
-    return value.replace("_", " ")
+    text = value[:-9] if value.endswith("_passport") else value
+    return text.replace("_", " ")
+
+
+def project_title_from_dir(path: Path) -> str:
+    return display_title(path.name)
 
 
 def ensure_project_root() -> None:
-    PROJECT_ROOT.mkdir(parents=True, exist_ok=True)
+    active_project_root().mkdir(parents=True, exist_ok=True)
 
 
 def project_xml_path(project_dir: Path) -> Optional[Path]:
@@ -186,10 +226,17 @@ def project_xml_path(project_dir: Path) -> Optional[Path]:
     return xmls[0] if xmls else None
 
 
+def require_project_xml(project_dir: Path) -> Path:
+    xml_path = project_xml_path(project_dir)
+    if xml_path is None:
+        raise RuntimeError(f"В папке проекта нет XML: {project_dir}")
+    return xml_path
+
+
 def list_projects() -> list[Project]:
     ensure_project_root()
     projects: list[Project] = []
-    for directory in sorted([path for path in PROJECT_ROOT.iterdir() if path.is_dir()], key=lambda p: p.name.lower()):
+    for directory in sorted([path for path in active_project_root().iterdir() if path.is_dir()], key=lambda p: p.name.lower()):
         xml_path = project_xml_path(directory)
         if xml_path:
             projects.append(Project(display_title(directory.name), directory, xml_path))
@@ -234,6 +281,251 @@ def find_existing_presets_xlsx(project_dir: Path) -> Optional[Path]:
         return candidates[0]
     legacy = project_dir / "passport.xlsx"
     return legacy if legacy.exists() else None
+
+
+def load_sftp_config() -> SftpConfig:
+    try:
+        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return SftpConfig()
+    raw_host = str(data.get("host", data.get("url", ""))).strip()
+    raw_host = raw_host.removeprefix("sftp://").removeprefix("ssh://")
+    raw_host = re.sub(r"^https?://", "", raw_host).split("/", 1)[0]
+    try:
+        port = int(data.get("port", 22))
+    except (TypeError, ValueError):
+        port = 22
+    return SftpConfig(
+        host=raw_host,
+        port=port,
+        username=str(data.get("username", "")),
+        password=str(data.get("password", "")),
+        remote_dir=str(data.get("remote_dir", REMOTE_PROJECT_ROOT_NAME)) or REMOTE_PROJECT_ROOT_NAME,
+    )
+
+
+def save_sftp_config(config: SftpConfig) -> None:
+    APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    CONFIG_PATH.write_text(
+        json.dumps(
+            {
+                "host": config.host,
+                "port": config.port,
+                "username": config.username,
+                "password": config.password,
+                "remote_dir": config.remote_dir,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
+def local_project_files(local_dir: Path) -> list[Path]:
+    return sorted(
+        [path for path in local_dir.rglob("*") if path.is_file() and not path.name.endswith(".download")],
+        key=lambda path: (0 if path.suffix.lower() in XML_EXTENSIONS else 1, str(path.relative_to(local_dir)).lower()),
+    )
+
+
+def sftp_join(*parts: str) -> str:
+    cleaned = []
+    absolute = False
+    for part in parts:
+        if not part:
+            continue
+        text = str(part).replace("\\", "/")
+        if text.startswith("/") and not cleaned:
+            absolute = True
+        cleaned.extend(piece for piece in text.split("/") if piece)
+    prefix = "/" if absolute else ""
+    return prefix + "/".join(cleaned)
+
+
+def sftp_parent(path: str) -> str:
+    clean = path.rstrip("/")
+    if "/" not in clean:
+        return ""
+    return clean.rsplit("/", 1)[0]
+
+
+def sftp_basename(path: str) -> str:
+    return path.rstrip("/").rsplit("/", 1)[-1]
+
+
+def sftp_exists(sftp: paramiko.SFTPClient, path: str) -> bool:
+    try:
+        sftp.stat(path)
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
+
+
+def ensure_sftp_dir(sftp: paramiko.SFTPClient, path: str) -> None:
+    current = "/" if path.startswith("/") else ""
+    for part in [piece for piece in path.split("/") if piece]:
+        current = sftp_join(current, part)
+        try:
+            sftp.mkdir(current)
+        except OSError:
+            pass
+
+
+def sftp_is_dir(sftp: paramiko.SFTPClient, path: str) -> bool:
+    try:
+        return stat.S_ISDIR(sftp.stat(path).st_mode)
+    except OSError:
+        return False
+
+
+def remove_sftp_path(sftp: paramiko.SFTPClient, path: str) -> None:
+    if not sftp_exists(sftp, path):
+        return
+    if sftp_is_dir(sftp, path):
+        for item in sftp.listdir_attr(path):
+            remove_sftp_path(sftp, sftp_join(path, item.filename))
+        sftp.rmdir(path)
+    else:
+        sftp.remove(path)
+
+
+def sftp_project_names(sftp: paramiko.SFTPClient, remote_root: str) -> list[str]:
+    ensure_sftp_dir(sftp, remote_root)
+    names: list[str] = []
+    for item in sftp.listdir_attr(remote_root):
+        path = sftp_join(remote_root, item.filename)
+        if stat.S_ISDIR(item.st_mode):
+            try:
+                if any(name.lower().endswith(".xml") for name in sftp.listdir(path)):
+                    names.append(item.filename)
+            except OSError:
+                pass
+    return sorted(names, key=str.lower)
+
+
+def download_sftp_project_index(sftp: paramiko.SFTPClient, remote_root: str, local_root: Path) -> None:
+    if local_root.exists():
+        shutil.rmtree(local_root)
+    local_root.mkdir(parents=True, exist_ok=True)
+    for project_name in sftp_project_names(sftp, remote_root):
+        remote_project = sftp_join(remote_root, project_name)
+        local_project = local_root / project_name
+        local_project.mkdir(parents=True, exist_ok=True)
+        for item in sftp.listdir_attr(remote_project):
+            if stat.S_ISDIR(item.st_mode):
+                continue
+            sftp.get(sftp_join(remote_project, item.filename), str(local_project / item.filename))
+
+
+def collect_sftp_files(sftp: paramiko.SFTPClient, remote_dir: str, base_relative: Path = Path()) -> list[RemoteFile]:
+    files: list[RemoteFile] = []
+    for item in sftp.listdir_attr(remote_dir):
+        remote_path = sftp_join(remote_dir, item.filename)
+        relative = base_relative / item.filename
+        if stat.S_ISDIR(item.st_mode):
+            files.extend(collect_sftp_files(sftp, remote_path, relative))
+        else:
+            files.append(RemoteFile(remote_path, relative, int(item.st_size or 0)))
+    return files
+
+
+def download_sftp_project_atomic(
+    sftp: paramiko.SFTPClient,
+    remote_project: str,
+    local_project: Path,
+    progress: Optional[Callable[[int, int, str], None]] = None,
+) -> None:
+    if progress:
+        progress(0, 0, "собираю список файлов")
+    files = collect_sftp_files(sftp, remote_project)
+    temp_dir = local_project.parent / f".{local_project.name}.download"
+    backup_dir = local_project.parent / f".{local_project.name}.old"
+    if temp_dir.exists():
+        shutil.rmtree(temp_dir)
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        total = len(files)
+        for index, remote_file in enumerate(files, start=1):
+            if progress:
+                progress(index, total, str(remote_file.relative_path))
+            local_path = temp_dir / remote_file.relative_path
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            sftp.get(remote_file.remote_path, str(local_path))
+        if not project_xml_path(temp_dir):
+            raise RuntimeError("В скачанном проекте нет XML.")
+        if backup_dir.exists():
+            shutil.rmtree(backup_dir)
+        if local_project.exists():
+            local_project.replace(backup_dir)
+        temp_dir.replace(local_project)
+        if backup_dir.exists():
+            shutil.rmtree(backup_dir)
+    except Exception:
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir)
+        raise
+
+
+def upload_sftp_project_atomic(
+    sftp: paramiko.SFTPClient,
+    local_project: Path,
+    remote_project: str,
+    progress: Optional[Callable[[int, int, str], None]] = None,
+) -> None:
+    require_project_xml(local_project)
+    remote_root = sftp_parent(remote_project)
+    ensure_sftp_dir(sftp, remote_root)
+    temp_remote = remote_project.rstrip("/") + ".upload"
+    remove_sftp_path(sftp, temp_remote)
+    ensure_sftp_dir(sftp, temp_remote)
+    try:
+        files = local_project_files(local_project)
+        total = len(files)
+        for index, local_path in enumerate(files, start=1):
+            relative = local_path.relative_to(local_project)
+            if progress:
+                progress(index, total, str(relative))
+            remote_parent = temp_remote
+            for part in relative.parts[:-1]:
+                remote_parent = sftp_join(remote_parent, part)
+                ensure_sftp_dir(sftp, remote_parent)
+            sftp.put(str(local_path), sftp_join(remote_parent, relative.name))
+        remove_sftp_path(sftp, remote_project)
+        try:
+            sftp.rename(temp_remote, remote_project)
+        except OSError:
+            ensure_sftp_dir(sftp, sftp_parent(remote_project))
+            sftp.rename(temp_remote, remote_project)
+    except Exception:
+        remove_sftp_path(sftp, temp_remote)
+        raise
+
+
+def copy_project_dir(source: Path, target_root: Path, replace: bool) -> Path:
+    target = target_root / source.name
+    if target.exists():
+        if not replace:
+            raise FileExistsError(target)
+        shutil.rmtree(target)
+    target_root.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source, target)
+    return target
+
+
+def mirror_project_to_remote_cache(project_dir: Path) -> None:
+    target = REMOTE_CACHE_ROOT / project_dir.name
+    try:
+        if target.resolve() == project_dir.resolve():
+            return
+    except OSError:
+        pass
+    if target.exists():
+        shutil.rmtree(target)
+    REMOTE_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(project_dir, target)
 
 
 def parse_grandma2_presets(xml_path: Path) -> list[PresetItem]:
@@ -424,10 +716,14 @@ def load_passport_rows(items: list[PresetItem], project_dir: Path, title: str) -
             row.preset_no = item.preset_no if item else ""
         stem = row.file_stem
         counters[stem] = counters.get(stem, 0) + 1
+        stems = [stem]
+        legacy_stem = safe_filename(f"{row.preset_label}_{row.fixture_id}")
+        if legacy_stem not in stems:
+            stems.append(legacy_stem)
         if counters[stem] == 1:
-            row.photo_path = find_photo_for_stem(stem, photo_dir)
+            row.photo_path = next((photo for candidate in stems if (photo := find_photo_for_stem(candidate, photo_dir))), None)
         else:
-            row.photo_path = find_photo_for_stem(f"{stem}_{counters[stem]}", photo_dir)
+            row.photo_path = next((photo for candidate in stems if (photo := find_photo_for_stem(f"{candidate}_{counters[stem]}", photo_dir))), None)
     return rows, warning
 
 
@@ -533,6 +829,16 @@ class PassportApp(tk.Tk):
         self.configure(bg=BLACK)
 
         self.project: Optional[Project] = None
+        self.storage_mode = tk.StringVar(value="local")
+        self.sftp_config = load_sftp_config()
+        self.ssh_client: Optional[paramiko.SSHClient] = None
+        self.cloud_session: Optional[paramiko.SFTPClient] = None
+        self.remote_base_dir = ""
+        self.remote_connected = False
+        self.storage_status = tk.StringVar(value="")
+        self.cloud_button_text = tk.StringVar(value="Настройки облака")
+        self.transfer_status = tk.StringVar(value="")
+        self.transfer_return_frame = "start"
         self.mode = "start"
         self.items: list[PresetItem] = []
         self.rows: list[PassportRow] = []
@@ -555,8 +861,10 @@ class PassportApp(tk.Tk):
         self.frames: dict[str, tk.Frame] = {}
         self._configure_style()
         self._build_pages()
+        self.update_storage_status()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.show_start()
+        self.after(250, self.try_connect_remote_on_start)
 
     def _configure_style(self) -> None:
         style = ttk.Style(self)
@@ -566,11 +874,11 @@ class PassportApp(tk.Tk):
         style.configure("Panel.TFrame", background=PANEL)
         style.configure("TLabel", background=BLACK, foreground="white")
         style.configure("Title.TLabel", background=BLACK, foreground=YELLOW, font=("", 22, "bold"))
-        style.configure("Yellow.TButton", background=BLACK, foreground=YELLOW, bordercolor=YELLOW, focusthickness=2, focuscolor=YELLOW, padding=8)
+        style.configure("Yellow.TButton", background=BLACK, foreground=YELLOW, bordercolor=YELLOW, focusthickness=2, focuscolor=YELLOW, padding=14, font=("", 13, "bold"))
         style.map("Yellow.TButton", background=[("active", PANEL_2)], foreground=[("disabled", MUTED)])
-        style.configure("Silver.TButton", background=BLACK, foreground=SILVER, bordercolor=SILVER, padding=8)
+        style.configure("Silver.TButton", background=BLACK, foreground=SILVER, bordercolor=SILVER, padding=14, font=("", 13, "bold"))
         style.map("Silver.TButton", background=[("active", PANEL_2)], foreground=[("disabled", MUTED)])
-        style.configure("Danger.TButton", background=BLACK, foreground=RED, bordercolor=RED, padding=6)
+        style.configure("Danger.TButton", background=BLACK, foreground=RED, bordercolor=RED, padding=12, font=("", 13, "bold"))
         style.configure("Treeview", background=PANEL, foreground="white", fieldbackground=PANEL, rowheight=30, bordercolor=BLACK)
         style.configure("Treeview.Heading", background=BLACK, foreground=YELLOW, font=("", 11, "bold"))
         style.map("Treeview", background=[("selected", YELLOW)], foreground=[("selected", BLACK)])
@@ -581,18 +889,21 @@ class PassportApp(tk.Tk):
     def _build_pages(self) -> None:
         container = tk.Frame(self, bg=BLACK)
         container.pack(fill="both", expand=True)
-        for name in ["start", "preset_setup", "project_list", "files", "workspace", "partitura"]:
+        for name in ["start", "project_source", "preset_setup", "project_list", "project_mode", "files", "workspace", "partitura", "transfer"]:
             frame = tk.Frame(container, bg=BLACK)
             frame.grid(row=0, column=0, sticky="nsew")
             self.frames[name] = frame
         container.rowconfigure(0, weight=1)
         container.columnconfigure(0, weight=1)
         self._build_start_page()
+        self._build_project_source_page()
         self._build_preset_setup_page()
         self._build_project_list_page()
+        self._build_project_mode_page()
         self._build_files_page()
         self._build_workspace_page()
         self._build_partitura_page()
+        self._build_transfer_page()
 
     def show_frame(self, name: str) -> None:
         self.mode = name
@@ -614,11 +925,65 @@ class PassportApp(tk.Tk):
         frame = self.frames["start"]
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(0, weight=1)
+        frame.rowconfigure(1, weight=0)
         content = tk.Frame(frame, bg=BLACK)
         content.grid(row=0, column=0)
         self._logo_widget(content, large=True).pack(pady=(0, 28))
-        ttk.Button(content, text="Пресеты", style="Yellow.TButton", command=self.show_preset_setup).pack(fill="x", pady=8, ipady=8)
-        ttk.Button(content, text="Партитура", style="Yellow.TButton", command=self.show_partitura).pack(fill="x", pady=8, ipady=8)
+        ttk.Button(content, text="Проекты", style="Yellow.TButton", command=self.show_project_source).pack(fill="x", pady=8, ipady=8)
+        ttk.Button(content, textvariable=self.cloud_button_text, style="Silver.TButton", command=self.show_connection_settings).pack(fill="x", pady=8, ipady=8)
+
+        storage = tk.Frame(frame, bg=PANEL, highlightbackground=YELLOW, highlightthickness=1)
+        storage.grid(row=1, column=0, sticky="ew", padx=120, pady=(0, 34))
+        storage.columnconfigure(3, weight=1)
+        tk.Label(storage, text="Хранилище", bg=PANEL, fg=SILVER, font=("", 13, "bold")).grid(row=0, column=0, padx=(18, 14), pady=14, sticky="w")
+        self.local_storage_radio = tk.Radiobutton(
+            storage,
+            text="Локально",
+            variable=self.storage_mode,
+            value="local",
+            command=self.on_storage_mode_changed,
+            bg=PANEL,
+            fg=SILVER,
+            selectcolor=YELLOW,
+            activebackground=PANEL,
+            activeforeground=YELLOW,
+        )
+        self.local_storage_radio.grid(row=0, column=1, padx=10, pady=14)
+        self.remote_storage_radio = tk.Radiobutton(
+            storage,
+            text="Облако",
+            variable=self.storage_mode,
+            value="remote",
+            command=self.on_storage_mode_changed,
+            bg=PANEL,
+            fg=YELLOW,
+            selectcolor=YELLOW,
+            activebackground=PANEL,
+            activeforeground=YELLOW,
+        )
+        self.remote_storage_radio.grid(row=0, column=2, padx=10, pady=14)
+        self.storage_status_label = tk.Label(storage, textvariable=self.storage_status, bg=PANEL, fg=SILVER, font=("", 13, "bold"))
+        self.storage_status_label.grid(row=0, column=3, sticky="w", padx=12)
+        self.connection_settings_button = ttk.Button(storage, text="Настройка подключения", style="Silver.TButton", command=self.show_connection_settings)
+        self.connection_settings_button.grid(row=0, column=4, padx=(10, 18), pady=10)
+        storage.grid_remove()
+
+    def _build_project_source_page(self) -> None:
+        frame = self.frames["project_source"]
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(1, weight=1)
+        top = tk.Frame(frame, bg=BLACK)
+        top.grid(row=0, column=0, sticky="ew", padx=18, pady=18)
+        ttk.Button(top, text="Назад", style="Silver.TButton", command=self.show_start).pack(side="left")
+        ttk.Label(top, text="Проекты", style="Title.TLabel").pack(side="left", padx=18)
+
+        body = tk.Frame(frame, bg=BLACK, width=560, height=320)
+        body.grid(row=1, column=0)
+        body.grid_propagate(False)
+        body.columnconfigure(0, weight=1, minsize=560)
+        ttk.Button(body, text="Устройство", style="Yellow.TButton", command=self.show_local_projects).grid(row=0, column=0, sticky="ew", pady=10, ipady=14)
+        ttk.Button(body, text="Облако", style="Yellow.TButton", command=self.show_remote_projects).grid(row=1, column=0, sticky="ew", pady=10, ipady=14)
+        tk.Label(body, textvariable=self.storage_status, bg=BLACK, fg=SILVER, font=("", 13, "bold"), wraplength=540, justify="center").grid(row=2, column=0, sticky="ew", pady=(22, 0))
 
     def _build_preset_setup_page(self) -> None:
         frame = self.frames["preset_setup"]
@@ -672,17 +1037,39 @@ class PassportApp(tk.Tk):
 
         buttons = tk.Frame(frame, bg=BLACK)
         buttons.grid(row=3, column=0, sticky="ew", padx=36, pady=(0, 24))
-        buttons.columnconfigure((0, 1, 2, 3), weight=1)
-        ttk.Button(buttons, text="Открыть", style="Yellow.TButton", command=self.open_selected_project).grid(row=0, column=0, sticky="ew", padx=(0, 8))
-        ttk.Button(buttons, text="Файлы", style="Silver.TButton", command=self.open_selected_project_files).grid(row=0, column=1, sticky="ew", padx=8)
-        ttk.Button(buttons, text="Переименовать", style="Silver.TButton", command=self.rename_selected_project).grid(row=0, column=2, sticky="ew", padx=8)
-        ttk.Button(buttons, text="Удалить", style="Danger.TButton", command=self.delete_selected_project).grid(row=0, column=3, sticky="ew", padx=(8, 0))
+        buttons.columnconfigure(0, weight=1)
+        self.create_project_button = ttk.Button(buttons, text="Создать проект", style="Yellow.TButton", command=self.create_preset_project_from_xml)
+        self.create_project_button.grid(row=0, column=0, sticky="ew", ipady=14)
 
         self.project_menu = tk.Menu(self, tearoff=False)
         self.project_menu.add_command(label="Открыть", command=self.open_selected_project)
-        self.project_menu.add_command(label="Файлы", command=self.open_selected_project_files)
         self.project_menu.add_command(label="Переименовать", command=self.rename_selected_project)
         self.project_menu.add_command(label="Удалить", command=self.delete_selected_project)
+
+    def _build_project_mode_page(self) -> None:
+        frame = self.frames["project_mode"]
+        frame.columnconfigure(0, weight=1)
+        top = tk.Frame(frame, bg=BLACK)
+        top.grid(row=0, column=0, sticky="ew", padx=18, pady=18)
+        ttk.Button(top, text="Назад", style="Silver.TButton", command=lambda: self.show_project_list("projects")).pack(side="left")
+        self.project_mode_title = tk.StringVar(value="Проект")
+        ttk.Label(top, textvariable=self.project_mode_title, style="Title.TLabel").pack(side="left", padx=18)
+
+        body = tk.Frame(frame, bg=BLACK)
+        body.grid(row=1, column=0, sticky="", padx=80, pady=70)
+        body.columnconfigure((0, 1), weight=1)
+
+        self.open_presets_button = ttk.Button(body, text="Пресеты", style="Yellow.TButton", command=lambda: self.open_project_builder("presets"))
+        self.open_presets_button.grid(row=0, column=0, sticky="ew", padx=18, pady=18, ipady=26)
+        self.open_presets_button.bind("<Button-3>", lambda _e: self.show_kind_menu("presets"))
+        self.open_presets_button.bind("<Button-2>", lambda _e: self.show_kind_menu("presets"))
+
+        self.open_partitura_button = ttk.Button(body, text="Партитура", style="Yellow.TButton", command=lambda: self.open_project_builder("partitura"))
+        self.open_partitura_button.grid(row=0, column=1, sticky="ew", padx=18, pady=18, ipady=26)
+        self.open_partitura_button.bind("<Button-3>", lambda _e: self.show_kind_menu("partitura"))
+        self.open_partitura_button.bind("<Button-2>", lambda _e: self.show_kind_menu("partitura"))
+
+        self.kind_menu = tk.Menu(self, tearoff=False)
 
     def _build_files_page(self) -> None:
         frame = self.frames["files"]
@@ -721,7 +1108,7 @@ class PassportApp(tk.Tk):
 
         top = tk.Frame(frame, bg=BLACK)
         top.grid(row=0, column=0, columnspan=2, sticky="ew", padx=14, pady=12)
-        ttk.Button(top, text="Назад", style="Silver.TButton", command=lambda: self.show_project_list("presets")).pack(side="left", padx=(0, 8))
+        ttk.Button(top, text="Назад", style="Silver.TButton", command=self.show_project_mode).pack(side="left", padx=(0, 8))
         ttk.Button(top, text="Файлы", style="Yellow.TButton", command=lambda: self.show_files("presets")).pack(side="left", padx=8)
         self.workspace_summary = tk.StringVar(value="")
         ttk.Label(top, textvariable=self.workspace_summary).pack(side="left", padx=16)
@@ -734,8 +1121,17 @@ class PassportApp(tk.Tk):
         self.current_var = tk.StringVar(value="")
         ttk.Label(left, textvariable=self.current_var, font=("", 16, "bold")).grid(row=0, column=0, sticky="ew", pady=(0, 8))
 
+        camera = tk.Frame(left, bg=PANEL)
+        camera.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        camera.columnconfigure(1, weight=1)
+        tk.Label(camera, text="Камера", bg=PANEL, fg=SILVER, font=("", 13, "bold")).grid(row=0, column=0, padx=14, pady=10, sticky="w")
+        self.workspace_camera_source = ttk.Combobox(camera, textvariable=self.camera_source_var, values=["0 iPhone", "1 FaceTime", "2", "3"], width=28)
+        self.workspace_camera_source.grid(row=0, column=1, padx=8, sticky="ew")
+        ttk.Button(camera, text="Подключить", style="Silver.TButton", command=self.connect_camera).grid(row=0, column=2, padx=8)
+        ttk.Button(camera, text="Остановить", style="Silver.TButton", command=self.stop_camera).grid(row=0, column=3, padx=(0, 14))
+
         self.video_container = tk.Frame(left, bg=PANEL)
-        self.video_container.grid(row=1, column=0, sticky="nsew", pady=(0, 10))
+        self.video_container.grid(row=2, column=0, sticky="nsew", pady=(0, 10))
         self.video_container.columnconfigure(0, weight=1)
         self.video_container.rowconfigure(0, weight=1)
         self.video_label = tk.Label(self.video_container, bg=PANEL, fg=SILVER, text="", font=("", 16), compound="center")
@@ -744,7 +1140,7 @@ class PassportApp(tk.Tk):
         self.delete_photo_button.place_forget()
 
         description_frame = tk.Frame(left, bg=BLACK)
-        description_frame.grid(row=2, column=0, sticky="nsew", pady=(0, 10))
+        description_frame.grid(row=3, column=0, sticky="nsew", pady=(0, 10))
         description_frame.columnconfigure(0, weight=1)
         description_frame.rowconfigure(0, weight=1)
         self.description_text = PlaceholderText(
@@ -763,7 +1159,7 @@ class PassportApp(tk.Tk):
         self.description_text.bind("<KeyRelease>", self.on_description_changed)
 
         controls = tk.Frame(left, bg=BLACK)
-        controls.grid(row=3, column=0, sticky="ew")
+        controls.grid(row=4, column=0, sticky="ew")
         controls.columnconfigure((0, 1, 2, 3, 4), weight=1)
         self.photo_button = ttk.Button(controls, text="Фото", style="Yellow.TButton", command=self.take_photo)
         self.photo_button.grid(row=0, column=0, sticky="ew", padx=(0, 8))
@@ -828,7 +1224,7 @@ class PassportApp(tk.Tk):
         frame.rowconfigure(3, weight=1)
         top = tk.Frame(frame, bg=BLACK)
         top.grid(row=0, column=0, sticky="ew", padx=18, pady=18)
-        ttk.Button(top, text="Назад", style="Silver.TButton", command=self.show_start).pack(side="left")
+        ttk.Button(top, text="Назад", style="Silver.TButton", command=self.show_project_mode).pack(side="left")
         ttk.Label(top, text="Партитура", style="Title.TLabel").pack(side="left", padx=18)
 
         actions = tk.Frame(frame, bg=BLACK)
@@ -836,6 +1232,7 @@ class PassportApp(tk.Tk):
         actions.columnconfigure((0, 1), weight=1)
         ttk.Button(actions, text="Открыть проект", style="Yellow.TButton", command=lambda: self.show_project_list("partitura")).grid(row=0, column=0, sticky="ew", padx=(0, 10), ipady=8)
         ttk.Button(actions, text="Загрузить XML", style="Yellow.TButton", command=self.create_partitura_project_from_xml).grid(row=0, column=1, sticky="ew", padx=(10, 0), ipady=8)
+        actions.grid_remove()
 
         self.partitura_project_var = tk.StringVar(value="Проект не выбран")
         ttk.Label(frame, textvariable=self.partitura_project_var).grid(row=2, column=0, sticky="nw", padx=36)
@@ -858,8 +1255,460 @@ class PassportApp(tk.Tk):
         bottom.columnconfigure(0, weight=1)
         ttk.Button(bottom, text="Создать партитуру", style="Yellow.TButton", command=self.create_partitura_files).grid(row=0, column=0, sticky="ew", ipady=10)
 
+    def _build_transfer_page(self) -> None:
+        frame = self.frames["transfer"]
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(0, weight=1)
+        body = tk.Frame(frame, bg=BLACK, width=680, height=240)
+        body.grid(row=0, column=0)
+        body.grid_propagate(False)
+        body.columnconfigure(0, weight=1)
+        ttk.Label(body, text="Облако", style="Title.TLabel").grid(row=0, column=0, pady=(8, 26))
+        tk.Label(body, textvariable=self.transfer_status, bg=BLACK, fg=SILVER, font=("", 18, "bold"), wraplength=640, justify="center").grid(row=1, column=0, sticky="ew")
+        self.transfer_progress = ttk.Progressbar(body, orient="horizontal", mode="indeterminate", length=560)
+        self.transfer_progress.grid(row=2, column=0, sticky="ew", padx=40, pady=(32, 0))
+
+    def show_transfer(self, text: str) -> None:
+        if self.mode != "transfer":
+            self.transfer_return_frame = self.mode
+        self.transfer_status.set(text)
+        self.storage_status.set(text)
+        self.show_frame("transfer")
+        try:
+            self.transfer_progress.start(12)
+        except Exception:
+            pass
+
+    def hide_transfer(self, return_to_previous: bool = False) -> None:
+        try:
+            self.transfer_progress.stop()
+        except Exception:
+            pass
+        if return_to_previous:
+            self.show_frame(self.transfer_return_frame)
+
+    def update_storage_status(self) -> None:
+        local_selected = self.storage_mode.get() == "local"
+        if hasattr(self, "local_storage_radio"):
+            self.local_storage_radio.configure(fg=YELLOW if local_selected else SILVER, activeforeground=YELLOW if local_selected else SILVER)
+            self.remote_storage_radio.configure(fg=YELLOW if not local_selected else SILVER, activeforeground=YELLOW if not local_selected else SILVER)
+        if self.storage_mode.get() == "remote":
+            self.connection_settings_button.grid()
+            if self.remote_connected:
+                self.storage_status.set("✓ подключено")
+                self.storage_status_label.configure(fg=GREEN)
+            else:
+                self.storage_status.set("✕ нет подключения")
+                self.storage_status_label.configure(fg=RED)
+        else:
+            self.connection_settings_button.grid_remove()
+            self.storage_status.set(f"Локально: {PROJECT_ROOT}")
+            self.storage_status_label.configure(fg=SILVER)
+        if hasattr(self, "cloud_button_text"):
+            self.cloud_button_text.set("Облако подключено" if self.remote_connected else "Настройки облака")
+        if hasattr(self, "preset_setup_status"):
+            self.preset_setup_status.set(f"Проекты хранятся в {active_project_root()}")
+
+    def try_connect_remote_on_start(self) -> None:
+        if not self.sftp_config.host or not self.sftp_config.username:
+            self.update_storage_status()
+            return
+        self.show_transfer("Проверяю подключение к облаку...")
+
+        def worker() -> None:
+            ok, error = self.connect_remote(self.sftp_config)
+            self.after(0, lambda: self.on_start_remote_connect_done(ok, error))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def on_start_remote_connect_done(self, ok: bool, error: str) -> None:
+        self.hide_transfer()
+        self.remote_connected = ok
+        self.update_storage_status()
+        if not ok:
+            self.storage_status.set(f"Облако не подключено: {error}")
+        self.show_start()
+
+    def on_storage_mode_changed(self) -> None:
+        self.project = None
+        if self.storage_mode.get() == "remote":
+            if self.remote_connected:
+                set_active_project_root(REMOTE_CACHE_ROOT)
+            else:
+                set_active_project_root(PROJECT_ROOT)
+        else:
+            set_active_project_root(PROJECT_ROOT)
+        self.update_storage_status()
+
+    def show_connection_settings(self) -> None:
+        window = tk.Toplevel(self)
+        window.title("Настройка облака")
+        window.configure(bg=BLACK)
+        window.transient(self)
+        window.grab_set()
+        window.columnconfigure(1, weight=1)
+
+        values = {
+            "host": tk.StringVar(value=self.sftp_config.host),
+            "port": tk.StringVar(value=str(self.sftp_config.port)),
+            "username": tk.StringVar(value=self.sftp_config.username),
+            "password": tk.StringVar(value=self.sftp_config.password),
+            "remote_dir": tk.StringVar(value=self.sftp_config.remote_dir),
+        }
+        labels = [
+            ("SFTP сервер", "host"),
+            ("Порт", "port"),
+            ("Пользователь", "username"),
+            ("Пароль", "password"),
+            ("Папка", "remote_dir"),
+        ]
+        for row, (label, key) in enumerate(labels):
+            tk.Label(window, text=label, bg=BLACK, fg=SILVER, font=("", 12, "bold")).grid(row=row, column=0, sticky="w", padx=18, pady=10)
+            entry = tk.Entry(window, textvariable=values[key], bg=PANEL, fg="white", insertbackground=YELLOW, relief="flat", show="*" if key == "password" else "")
+            entry.grid(row=row, column=1, sticky="ew", padx=(0, 18), pady=10, ipady=7)
+
+        status = tk.StringVar(value="")
+        status_label = tk.Label(window, textvariable=status, bg=BLACK, fg=SILVER)
+        status_label.grid(row=len(labels), column=0, columnspan=2, sticky="w", padx=18, pady=(6, 0))
+
+        def save_and_connect() -> None:
+            try:
+                port = int(values["port"].get().strip() or "22")
+            except ValueError:
+                messagebox.showerror(APP_TITLE, "Порт должен быть числом.", parent=window)
+                return
+            config = SftpConfig(
+                host=values["host"].get().strip(),
+                port=port,
+                username=values["username"].get().strip(),
+                password=values["password"].get(),
+                remote_dir=values["remote_dir"].get().strip() or REMOTE_PROJECT_ROOT_NAME,
+            )
+            if not config.host or not config.username:
+                messagebox.showerror(APP_TITLE, "Заполните SFTP сервер и пользователя.", parent=window)
+                return
+            status.set("Подключаюсь...")
+            window.update_idletasks()
+            ok, error = self.connect_remote(config)
+            if ok:
+                save_sftp_config(config)
+                self.sftp_config = config
+                self.storage_mode.set("remote")
+                set_active_project_root(REMOTE_CACHE_ROOT)
+                self.update_storage_status()
+                window.destroy()
+            else:
+                status.set(f"Ошибка: {error}")
+                status_label.configure(fg=RED)
+
+        buttons = tk.Frame(window, bg=BLACK)
+        buttons.grid(row=len(labels) + 1, column=0, columnspan=2, sticky="ew", padx=18, pady=18)
+        buttons.columnconfigure((0, 1), weight=1)
+        ttk.Button(buttons, text="Назад", style="Silver.TButton", command=window.destroy).grid(row=0, column=0, sticky="ew", padx=(0, 8), ipady=6)
+        ttk.Button(buttons, text="Подключить и сохранить", style="Yellow.TButton", command=save_and_connect).grid(row=0, column=1, sticky="ew", padx=(8, 0), ipady=6)
+
+    def connect_remote(self, config: SftpConfig) -> tuple[bool, str]:
+        self.close_remote()
+        ssh: Optional[paramiko.SSHClient] = None
+        try:
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            ssh.connect(
+                hostname=config.host,
+                port=config.port,
+                username=config.username,
+                password=config.password,
+                timeout=12,
+                banner_timeout=12,
+                auth_timeout=12,
+            )
+            session = ssh.open_sftp()
+            base = config.remote_dir.strip("/") or REMOTE_PROJECT_ROOT_NAME
+            ensure_sftp_dir(session, base)
+            if REMOTE_CACHE_ROOT.exists():
+                shutil.rmtree(REMOTE_CACHE_ROOT)
+            download_sftp_project_index(session, base, REMOTE_CACHE_ROOT)
+        except Exception as exc:
+            if ssh is not None:
+                try:
+                    ssh.close()
+                except Exception:
+                    pass
+            self.remote_connected = False
+            return False, str(exc)
+
+        self.ssh_client = ssh
+        self.cloud_session = session
+        self.remote_base_dir = base
+        self.remote_connected = True
+        return True, ""
+
+    def close_remote(self) -> None:
+        if self.cloud_session is not None:
+            try:
+                self.cloud_session.close()
+            except Exception:
+                pass
+        if self.ssh_client is not None:
+            try:
+                self.ssh_client.close()
+            except Exception:
+                pass
+        self.ssh_client = None
+        self.cloud_session = None
+        self.remote_connected = False
+
+    def ensure_remote_ready(self) -> bool:
+        if self.remote_connected and self.cloud_session is not None:
+            return True
+        if not self.sftp_config.host:
+            messagebox.showwarning(APP_TITLE, "Сначала настройте подключение к облаку.")
+            return False
+        ok, error = self.connect_remote(self.sftp_config)
+        if ok:
+            self.remote_connected = True
+            if self.storage_mode.get() == "remote":
+                set_active_project_root(REMOTE_CACHE_ROOT)
+            self.update_storage_status()
+            return True
+        self.update_storage_status()
+        messagebox.showerror(APP_TITLE, f"Не удалось подключиться к облаку:\n{error}")
+        return False
+
+    def ensure_remote_ready_silent(self) -> bool:
+        if self.remote_connected and self.cloud_session is not None:
+            return True
+        if not self.sftp_config.host:
+            return False
+        ok, _error = self.connect_remote(self.sftp_config)
+        self.remote_connected = ok
+        return ok
+
+    def refresh_remote_cache(self) -> bool:
+        if not self.ensure_remote_ready() or self.cloud_session is None:
+            return False
+        try:
+            download_sftp_project_index(self.cloud_session, self.remote_base_dir, REMOTE_CACHE_ROOT)
+            return True
+        except Exception as exc:
+            self.remote_connected = False
+            self.update_storage_status()
+            messagebox.showerror(APP_TITLE, f"Не удалось обновить проекты из облака:\n{exc}")
+            return False
+
+    def refresh_remote_project(self, project_name: str) -> Optional[Path]:
+        if not self.ensure_remote_ready() or self.cloud_session is None:
+            return None
+        remote_project = sftp_join(self.remote_base_dir, project_name)
+        local_project = REMOTE_CACHE_ROOT / project_name
+        try:
+            download_sftp_project_atomic(self.cloud_session, remote_project, local_project)
+            return local_project
+        except Exception as exc:
+            self.remote_connected = False
+            self.update_storage_status()
+            messagebox.showerror(APP_TITLE, f"Не удалось обновить проект из облака:\n{exc}")
+            return None
+
+    def upload_project_to_remote(self, project_dir: Path, ask_replace: bool = True) -> bool:
+        if not self.ensure_remote_ready() or self.cloud_session is None:
+            return False
+        require_project_xml(project_dir)
+        remote_project = sftp_join(self.remote_base_dir, project_dir.name)
+        exists = sftp_exists(self.cloud_session, remote_project)
+        if exists:
+            if ask_replace and not messagebox.askyesno(APP_TITLE, "Такой проект уже есть в облаке. Заменить?"):
+                return False
+        upload_sftp_project_atomic(self.cloud_session, project_dir, remote_project)
+        mirror_project_to_remote_cache(project_dir)
+        return True
+
+    def upload_project_to_remote_silent(
+        self,
+        project_dir: Path,
+        progress: Optional[Callable[[int, int, str], None]] = None,
+    ) -> None:
+        require_project_xml(project_dir)
+        config = self.sftp_config
+        if not config.host or not config.username:
+            raise RuntimeError("Сначала настройте подключение к облаку.")
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(
+            hostname=config.host,
+            port=config.port,
+            username=config.username,
+            password=config.password,
+            timeout=12,
+            banner_timeout=12,
+            auth_timeout=12,
+        )
+        session = ssh.open_sftp()
+        base = config.remote_dir.strip("/") or REMOTE_PROJECT_ROOT_NAME
+        ensure_sftp_dir(session, base)
+        remote_project = sftp_join(base, project_dir.name)
+        upload_sftp_project_atomic(session, project_dir, remote_project, progress=progress)
+        self.cloud_session = session
+        self.ssh_client = ssh
+        self.remote_base_dir = base
+        self.remote_connected = True
+        mirror_project_to_remote_cache(project_dir)
+
+    def download_project_from_remote(self, project_name: str, local_root: Path, ask_replace: bool = True) -> Optional[Path]:
+        if not self.ensure_remote_ready() or self.cloud_session is None:
+            return None
+        remote_project = sftp_join(self.remote_base_dir, project_name)
+        if not sftp_exists(self.cloud_session, remote_project):
+            messagebox.showerror(APP_TITLE, "В облаке проект не найден.")
+            return None
+        local_project = local_root / project_name
+        if local_project.exists():
+            if ask_replace and not messagebox.askyesno(APP_TITLE, "Такой проект уже есть локально. Заменить?"):
+                return None
+        download_sftp_project_atomic(self.cloud_session, remote_project, local_project)
+        return local_project
+
+    def download_project_from_remote_silent(
+        self,
+        project_name: str,
+        local_root: Path,
+        progress: Optional[Callable[[int, int, str], None]] = None,
+    ) -> Path:
+        config = self.sftp_config
+        if not config.host or not config.username:
+            raise RuntimeError("Сначала настройте подключение к облаку.")
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(
+            hostname=config.host,
+            port=config.port,
+            username=config.username,
+            password=config.password,
+            timeout=12,
+            banner_timeout=12,
+            auth_timeout=12,
+        )
+        session = ssh.open_sftp()
+        base = config.remote_dir.strip("/") or REMOTE_PROJECT_ROOT_NAME
+        ensure_sftp_dir(session, base)
+        remote_project = sftp_join(base, project_name)
+        if not sftp_exists(session, remote_project):
+            raise RuntimeError("В облаке проект не найден.")
+        local_project = local_root / project_name
+        download_sftp_project_atomic(session, remote_project, local_project, progress=progress)
+        self.cloud_session = session
+        self.ssh_client = ssh
+        self.remote_base_dir = base
+        self.remote_connected = True
+        return local_project
+
+    def sync_current_project_to_remote(self) -> None:
+        project = self.selected_project()
+        if not project:
+            return
+        project_dir = project.directory
+        self.show_transfer("Загружаю проект в облако...")
+
+        def progress(done: int, total: int, name: str) -> None:
+            text = f"Загружаю {done}/{total}: {name}"
+            self.after(0, lambda: (self.storage_status.set(text), self.transfer_status.set(text)))
+
+        def worker() -> None:
+            try:
+                self.upload_project_to_remote_silent(project_dir, progress=progress)
+                ok = True
+                self.after(0, lambda: self.on_remote_upload_done(ok, ""))
+            except Exception as exc:
+                self.after(0, lambda: self.on_remote_upload_done(False, str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def on_remote_upload_done(self, ok: bool, error: str) -> None:
+        self.hide_transfer(return_to_previous=True)
+        self.update_storage_status()
+        if ok:
+            if self.mode == "project_list" and self.storage_mode.get() == "remote":
+                self.show_project_list(self.project_list_mode)
+            messagebox.showinfo(APP_TITLE, "Проект сохранен в облако.")
+        else:
+            messagebox.showerror(APP_TITLE, f"Не удалось сохранить в облако:\n{error or 'ошибка подключения'}")
+
+    def sync_current_project_to_local(self) -> None:
+        project = self.selected_project()
+        if not project:
+            return
+        self.copy_project_to_local_with_prompt(project)
+
+    def copy_project_to_local_with_prompt(self, project: Project) -> None:
+        try:
+            if self.storage_mode.get() == "remote":
+                target = PROJECT_ROOT / project.directory.name
+                if target.exists() and not messagebox.askyesno(APP_TITLE, "Такой проект уже есть локально. Заменить?"):
+                    return
+                self.download_remote_project_in_background(project.directory.name)
+                return
+            else:
+                target = PROJECT_ROOT / project.directory.name
+                replace = True
+                if target.exists():
+                    replace = messagebox.askyesno(APP_TITLE, "Такой проект уже есть локально. Заменить?")
+                copy_project_dir(project.directory, PROJECT_ROOT, replace=replace)
+            messagebox.showinfo(APP_TITLE, "Проект сохранен локально.")
+        except FileExistsError:
+            messagebox.showwarning(APP_TITLE, "Проект уже есть локально.")
+        except Exception as exc:
+            messagebox.showerror(APP_TITLE, f"Не удалось сохранить локально:\n{exc}")
+
+    def download_remote_project_in_background(self, project_name: str) -> None:
+        self.show_transfer("Скачиваю проект из облака...")
+
+        def progress(done: int, total: int, name: str) -> None:
+            if total:
+                text = f"Скачиваю {done}/{total}: {name}"
+            else:
+                text = f"Скачиваю: {name}"
+            self.after(0, lambda: (self.storage_status.set(text), self.transfer_status.set(text)))
+
+        def worker() -> None:
+            try:
+                target = self.download_project_from_remote_silent(project_name, PROJECT_ROOT, progress=progress)
+                self.after(0, lambda: self.on_remote_download_done(True, target, ""))
+            except Exception as exc:
+                self.after(0, lambda: self.on_remote_download_done(False, None, str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def on_remote_download_done(self, ok: bool, target: Optional[Path], error: str) -> None:
+        self.hide_transfer()
+        self.update_storage_status()
+        if ok and target is not None:
+            set_active_project_root(PROJECT_ROOT)
+            self.storage_mode.set("local")
+            self.project = Project(project_title_from_dir(target), target, require_project_xml(target))
+            self.projects = list_projects()
+            messagebox.showinfo(APP_TITLE, "Проект сохранен локально.")
+            self.show_project_mode()
+        else:
+            messagebox.showerror(APP_TITLE, f"Не удалось скачать проект:\n{error or 'ошибка подключения'}")
+
     def show_start(self) -> None:
+        self.update_storage_status()
         self.show_frame("start")
+
+    def show_project_source(self) -> None:
+        self.update_storage_status()
+        self.show_frame("project_source")
+
+    def show_local_projects(self) -> None:
+        self.storage_mode.set("local")
+        set_active_project_root(PROJECT_ROOT)
+        self.update_storage_status()
+        self.show_project_list("projects")
+
+    def show_remote_projects(self) -> None:
+        self.storage_mode.set("remote")
+        self.update_storage_status()
+        self.refresh_remote_cache_in_background("projects")
 
     def show_preset_setup(self) -> None:
         self.show_frame("preset_setup")
@@ -868,19 +1717,96 @@ class PassportApp(tk.Tk):
         self.show_frame("partitura")
 
     def back_from_project_list(self) -> None:
-        self.show_partitura() if self.project_list_mode == "partitura" else self.show_preset_setup()
+        self.show_project_source()
 
     def back_from_files(self) -> None:
-        self.show_partitura() if self.files_mode == "partitura" else self.show_project_list("presets")
+        self.show_project_mode()
 
     def show_project_list(self, mode: str) -> None:
+        if self.storage_mode.get() == "remote":
+            set_active_project_root(REMOTE_CACHE_ROOT)
+        else:
+            set_active_project_root(PROJECT_ROOT)
+        self.update_storage_status()
         self.project_list_mode = mode
-        self.project_list_title.set("Проекты партитуры" if mode == "partitura" else "Проекты пресетов")
+        self.project_list_title.set("Проекты: облако" if self.storage_mode.get() == "remote" else "Проекты: устройство")
+        if hasattr(self, "create_project_button"):
+            if self.storage_mode.get() == "remote":
+                self.create_project_button.grid_remove()
+            else:
+                self.create_project_button.grid()
+                self.create_project_button.configure(state="normal")
         self.projects = list_projects()
         self.project_listbox.delete(0, "end")
         for project in self.projects:
             self.project_listbox.insert("end", project.title)
         self.show_frame("project_list")
+
+    def refresh_remote_cache_in_background(self, mode: str) -> None:
+        self.show_transfer("Обновляю список проектов в облаке...")
+
+        def worker() -> None:
+            try:
+                if not self.ensure_remote_ready_silent():
+                    raise RuntimeError("Не удалось подключиться к облаку.")
+                if self.cloud_session is None:
+                    raise RuntimeError("SFTP-сессия не открыта.")
+                download_sftp_project_index(self.cloud_session, self.remote_base_dir, REMOTE_CACHE_ROOT)
+                self.after(0, lambda: self.on_remote_cache_done(True, mode, ""))
+            except Exception as exc:
+                self.after(0, lambda: self.on_remote_cache_done(False, mode, str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def on_remote_cache_done(self, ok: bool, mode: str, error: str) -> None:
+        self.hide_transfer()
+        self.update_storage_status()
+        if ok:
+            self.show_project_list(mode)
+        else:
+            messagebox.showerror(APP_TITLE, f"Не удалось обновить облако:\n{error}")
+            self.show_project_source()
+
+    def show_project_mode(self) -> None:
+        if not self.project:
+            self.show_project_list("projects")
+            return
+        self.project_mode_title.set(self.project.title)
+        self.open_presets_button.configure(state="normal")
+        self.open_partitura_button.configure(state="normal")
+        self.show_frame("project_mode")
+
+    def show_kind_menu(self, mode: str) -> None:
+        if not self.project:
+            return
+        self.kind_menu.delete(0, "end")
+        if self.storage_mode.get() != "remote":
+            self.kind_menu.add_command(label="Открыть", command=lambda: self.open_project_builder(mode))
+            self.kind_menu.add_command(label="Файлы", command=lambda: self.show_files(mode))
+        if self.storage_mode.get() == "remote":
+            self.kind_menu.add_command(label="Загрузить на устройство", command=lambda: self.copy_project_to_local_with_prompt(self.project))
+        else:
+            self.kind_menu.add_command(label="Загрузить в облако", command=self.sync_open_project_to_remote)
+        self.kind_menu.tk_popup(self.winfo_pointerx(), self.winfo_pointery())
+
+    def sync_open_project_to_remote(self) -> None:
+        if not self.project:
+            return
+        project_dir = self.project.directory
+        self.show_transfer("Загружаю проект в облако...")
+
+        def progress(done: int, total: int, name: str) -> None:
+            text = f"Загружаю {done}/{total}: {name}"
+            self.after(0, lambda: (self.storage_status.set(text), self.transfer_status.set(text)))
+
+        def worker() -> None:
+            try:
+                self.upload_project_to_remote_silent(project_dir, progress=progress)
+                self.after(0, lambda: self.on_remote_upload_done(True, ""))
+            except Exception as exc:
+                self.after(0, lambda: self.on_remote_upload_done(False, str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def selected_project(self) -> Optional[Project]:
         selection = self.project_listbox.curselection()
@@ -893,23 +1819,48 @@ class PassportApp(tk.Tk):
         index = self.project_listbox.nearest(event.y)
         self.project_listbox.selection_clear(0, "end")
         self.project_listbox.selection_set(index)
+        self.project_menu.delete(0, "end")
+        self.project_menu.add_command(label="Открыть", command=self.open_selected_project)
+        self.project_menu.add_command(label="Переименовать", command=self.rename_selected_project)
+        if self.storage_mode.get() == "remote":
+            self.project_menu.add_command(label="Загрузить на устройство", command=self.sync_current_project_to_local)
+        else:
+            self.project_menu.add_command(label="Загрузить в облако", command=self.sync_current_project_to_remote)
+        self.project_menu.add_command(label="Удалить", command=self.delete_selected_project)
         self.project_menu.tk_popup(event.x_root, event.y_root)
 
     def open_selected_project(self) -> None:
         project = self.selected_project()
         if not project:
             return
-        if self.project_list_mode == "partitura":
-            self.project = project
-            self.partitura_project_var.set(f"Активный проект: {project.title}")
+        self.project = project
+        self.show_project_mode()
+
+    def open_project_builder(self, mode: str) -> None:
+        if not self.project:
+            return
+        if self.storage_mode.get() == "remote":
+            self.show_files(mode)
+            return
+        if mode == "partitura":
+            self.partitura_project_var.set(f"Активный проект: {self.project.title}")
             self.show_partitura()
         else:
-            self.open_preset_project(project)
+            self.open_preset_project(self.project)
 
     def open_selected_project_files(self) -> None:
         project = self.selected_project()
         if not project:
             return
+        if self.storage_mode.get() == "remote":
+            refreshed = self.refresh_remote_project(project.directory.name)
+            if refreshed is None:
+                return
+            xml = project_xml_path(refreshed)
+            if xml is None:
+                messagebox.showerror(APP_TITLE, "В проекте не найден XML файл.")
+                return
+            project = Project(directory=refreshed, title=project_title_from_dir(refreshed), xml_path=xml)
         self.project = project
         self.show_files(self.project_list_mode)
 
@@ -927,12 +1878,15 @@ class PassportApp(tk.Tk):
         if new_dir.exists() and new_dir != project.directory:
             messagebox.showerror(APP_TITLE, "Проект с таким названием уже есть.")
             return
-        project.directory.rename(new_dir)
+            project.directory.rename(new_dir)
         xml = project_xml_path(new_dir)
         if xml:
             target_xml = new_dir / f"{safe_filename(new_title)}.xml"
             if xml != target_xml:
                 xml.rename(target_xml)
+        if self.storage_mode.get() == "remote" and self.cloud_session is not None:
+            remove_sftp_path(self.cloud_session, sftp_join(self.remote_base_dir, project.directory.name))
+            self.upload_project_to_remote(new_dir, ask_replace=False)
         self.show_project_list(self.project_list_mode)
 
     def delete_selected_project(self) -> None:
@@ -941,6 +1895,8 @@ class PassportApp(tk.Tk):
             return
         if messagebox.askyesno(APP_TITLE, f"Удалить проект «{project.title}» целиком?"):
             shutil.rmtree(project.directory)
+            if self.storage_mode.get() == "remote" and self.cloud_session is not None:
+                remove_sftp_path(self.cloud_session, sftp_join(self.remote_base_dir, project.directory.name))
             self.show_project_list(self.project_list_mode)
 
     def create_preset_project_from_xml(self) -> None:
@@ -965,7 +1921,13 @@ class PassportApp(tk.Tk):
             return None
         title = title.strip() or source.stem
         try:
-            return copy_xml_to_project(source, title)
+            project_dir = project_dir_for_title(title)
+            if project_dir.exists():
+                if not messagebox.askyesno(APP_TITLE, "Такой проект уже есть. Заменить?"):
+                    return None
+                shutil.rmtree(project_dir)
+            project = copy_xml_to_project(source, title)
+            return project
         except Exception as exc:
             messagebox.showerror(APP_TITLE, f"Не удалось создать проект:\n{exc}")
             return None
@@ -1036,6 +1998,8 @@ class PassportApp(tk.Tk):
         path = self.selected_file()
         if path and messagebox.askyesno(APP_TITLE, f"Удалить файл {path.name}?"):
             path.unlink()
+            if self.storage_mode.get() == "remote" and self.project:
+                self.upload_project_to_remote(self.project.directory, ask_replace=False)
             self.show_files(self.files_mode)
 
     def refresh_table(self) -> None:
@@ -1422,6 +2386,7 @@ class PassportApp(tk.Tk):
         self.save_current_description()
         self.autosave_passport()
         self.stop_camera()
+        self.close_remote()
         self.destroy()
 
 

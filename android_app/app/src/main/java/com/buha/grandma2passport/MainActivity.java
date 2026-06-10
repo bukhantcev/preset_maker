@@ -3,6 +3,7 @@ package com.buha.grandma2passport;
 import android.Manifest;
 import android.app.AlertDialog;
 import android.content.ClipData;
+import android.content.SharedPreferences;
 import android.content.res.ColorStateList;
 import android.content.res.Configuration;
 import android.content.Intent;
@@ -44,6 +45,7 @@ import android.widget.SeekBar;
 import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.ArrayAdapter;
+import android.widget.AdapterView;
 import android.widget.Toast;
 
 import androidx.activity.ComponentActivity;
@@ -60,20 +62,32 @@ import androidx.core.content.ContextCompat;
 import androidx.core.content.FileProvider;
 
 import com.google.common.util.concurrent.ListenableFuture;
-
+import com.jcraft.jsch.ChannelSftp;
+import com.jcraft.jsch.JSch;
+import com.jcraft.jsch.Session;
+import com.jcraft.jsch.SftpATTRS;
+import com.jcraft.jsch.SftpException;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
 import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Base64;
+import java.util.Comparator;
 import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -83,6 +97,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
+import java.util.Vector;
 
 import javax.xml.parsers.DocumentBuilderFactory;
 
@@ -104,6 +119,9 @@ public class MainActivity extends ComponentActivity {
     private static final int BRAND_TEXT = 0xfff4f4f4;
     private static final int BRAND_MUTED = 0xffb8b8b8;
     private static final int BRAND_SELECTED = 0xffffc21a;
+    private static final int BRAND_GREEN = 0xff4ee06d;
+    private static final int BRAND_RED = 0xffff4545;
+    private static final String REMOTE_ROOT_NAME = "MA2_passports";
 
     private final ArrayList<PresetItem> items = new ArrayList<>();
     private final ArrayList<PassportRow> rows = new ArrayList<>();
@@ -136,6 +154,9 @@ public class MainActivity extends ComponentActivity {
     private File filesScreenProjectDir;
     private String filesScreenKind = "presets";
     private String projectListMode = "presets";
+    private boolean projectBrowserCloud = false;
+    private File projectModeDir;
+    private boolean projectModeCloud = false;
     private File selectedPartituraProjectDir;
     private final ArrayList<PartituraField> partituraFields = new ArrayList<>();
     private File tempPhoto;
@@ -153,6 +174,14 @@ public class MainActivity extends ComponentActivity {
     private String currentScreen = "start";
     private int lensFacing = CameraSelector.LENS_FACING_BACK;
     private final Object passportWriteLock = new Object();
+    private boolean remoteMode = false;
+    private boolean remoteConnected = false;
+    private String cloudUrl = "";
+    private int cloudPort = 22;
+    private String cloudUser = "";
+    private String cloudPassword = "";
+    private String remoteBasePath = "";
+    private TextView loadingText;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -162,7 +191,9 @@ public class MainActivity extends ComponentActivity {
             passportsRootDir();
         } catch (Exception ignored) {
         }
+        loadServerSettings();
         showStartScreen();
+        tryConnectRemoteOnStart();
     }
 
     @Override
@@ -250,8 +281,15 @@ public class MainActivity extends ComponentActivity {
         String value = text.toString();
         return value.equals("Назад")
                 || value.equals("Открыть XML")
+                || value.equals("Настройка облака")
+                || value.equals("Открыть")
+                || value.equals("Открыть пресеты")
+                || value.equals("Открыть партитуру")
+                || value.equals("Переименовать")
+                || value.equals("Загрузить на устройство")
                 || value.equals("Экспорт")
                 || value.equals("Удалить выбранное")
+                || value.equals("Удалить")
                 || value.equals("Пропустить");
     }
 
@@ -300,6 +338,7 @@ public class MainActivity extends ComponentActivity {
         currentScreen = "start";
         cameraScreen = false;
         filesScreenProjectDir = null;
+        projectModeDir = null;
         stopCamera();
 
         LinearLayout root = new LinearLayout(this);
@@ -315,21 +354,141 @@ public class MainActivity extends ComponentActivity {
         logoParams.setMargins(0, 0, 0, dp(28));
         root.addView(logo, logoParams);
 
-        Button presetsButton = new Button(this);
-        presetsButton.setText("Пресеты");
-        presetsButton.setOnClickListener(v -> showPresetSetupScreen());
-        LinearLayout.LayoutParams presetsParams = new LinearLayout.LayoutParams(-1, -2);
-        presetsParams.setMargins(0, dp(8), 0, dp(8));
-        root.addView(presetsButton, presetsParams);
+        Button projectsButton = new Button(this);
+        projectsButton.setText("Проекты");
+        projectsButton.setOnClickListener(v -> showProjectSourceScreen());
+        LinearLayout.LayoutParams projectsParams = new LinearLayout.LayoutParams(-1, -2);
+        projectsParams.setMargins(0, dp(8), 0, dp(8));
+        root.addView(projectsButton, projectsParams);
 
-        Button partituraButton = new Button(this);
-        partituraButton.setText("Партитура");
-        partituraButton.setOnClickListener(v -> showPartituraSetupScreen());
-        LinearLayout.LayoutParams partituraParams = new LinearLayout.LayoutParams(-1, -2);
-        partituraParams.setMargins(0, dp(8), 0, dp(8));
-        root.addView(partituraButton, partituraParams);
+        Button cloudButton = new Button(this);
+        cloudButton.setText(remoteConnected ? "Облако подключено" : "Настройки облака");
+        cloudButton.setOnClickListener(v -> showSftpSettingsDialog());
+        LinearLayout.LayoutParams cloudParams = new LinearLayout.LayoutParams(-1, -2);
+        cloudParams.setMargins(0, dp(8), 0, dp(8));
+        root.addView(cloudButton, cloudParams);
+
+        addSpacer(root, 1);
 
         setContentView(root);
+    }
+
+    private void showProjectSourceScreen() {
+        currentScreen = "project_source";
+        cameraScreen = false;
+        filesScreenProjectDir = null;
+        projectModeDir = null;
+        stopCamera();
+
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(dp(24), dp(24), dp(24), dp(24));
+
+        TextView title = new TextView(this);
+        title.setText("Проекты");
+        title.setTextSize(24);
+        title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        title.setGravity(Gravity.CENTER);
+        root.addView(title, new LinearLayout.LayoutParams(-1, -2));
+
+        addSpacer(root, 1);
+
+        LinearLayout buttons = new LinearLayout(this);
+        buttons.setOrientation(LinearLayout.VERTICAL);
+        buttons.setMinimumWidth(dp(560));
+
+        Button local = new Button(this);
+        local.setText("Устройство");
+        local.setOnClickListener(v -> {
+            projectBrowserCloud = false;
+            remoteMode = false;
+            saveServerSettings();
+            showProjectListScreen("projects");
+        });
+        buttons.addView(local, new LinearLayout.LayoutParams(-1, dp(76)));
+
+        Button cloud = new Button(this);
+        cloud.setText("Облако");
+        cloud.setOnClickListener(v -> {
+            projectBrowserCloud = true;
+            remoteMode = true;
+            saveServerSettings();
+            showProjectListScreen("projects");
+        });
+        LinearLayout.LayoutParams cloudParams = new LinearLayout.LayoutParams(-1, -2);
+        cloudParams.setMargins(0, dp(14), 0, 0);
+        buttons.addView(cloud, cloudParams);
+
+        TextView status = new TextView(this);
+        status.setText(remoteConnected ? "✓ облако подключено" : "облако подключится при открытии");
+        status.setTextColor(remoteConnected ? BRAND_GREEN : BRAND_MUTED);
+        status.setGravity(Gravity.CENTER);
+        status.setPadding(0, dp(18), 0, 0);
+        buttons.addView(status, new LinearLayout.LayoutParams(-1, -2));
+        root.addView(buttons, new LinearLayout.LayoutParams(-1, -2));
+
+        addSpacer(root, 1);
+
+        Button back = new Button(this);
+        back.setText("Назад");
+        back.setOnClickListener(v -> showStartScreen());
+        root.addView(back, new LinearLayout.LayoutParams(-1, -2));
+
+        setContentView(root);
+    }
+
+    private View storagePanel() {
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(14), dp(14), dp(14), dp(14));
+        panel.setBackground(rounded(BRAND_PANEL, BRAND_YELLOW, dp(1), dp(10)));
+
+        TextView title = new TextView(this);
+        title.setText("Хранилище");
+        title.setTextSize(15);
+        title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        title.setTextColor(BRAND_SILVER);
+        panel.addView(title, new LinearLayout.LayoutParams(-1, -2));
+
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        Button local = new Button(this);
+        local.setText("Локально");
+        local.setTextColor(remoteMode ? BRAND_SILVER : BRAND_YELLOW);
+        local.setBackground(rounded(BRAND_BLACK, remoteMode ? BRAND_SILVER_DARK : BRAND_YELLOW, dp(2), dp(8)));
+        local.setOnClickListener(v -> {
+            remoteMode = false;
+            saveServerSettings();
+            showStartScreen();
+        });
+        row.addView(local, buttonParams());
+
+        Button remote = new Button(this);
+        remote.setText("Облако");
+        remote.setTextColor(remoteMode ? BRAND_YELLOW : BRAND_SILVER);
+        remote.setBackground(rounded(BRAND_BLACK, remoteMode ? BRAND_YELLOW : BRAND_SILVER_DARK, dp(2), dp(8)));
+        remote.setOnClickListener(v -> {
+            remoteMode = true;
+            saveServerSettings();
+            showStartScreen();
+        });
+        row.addView(remote, buttonParams());
+        panel.addView(row, new LinearLayout.LayoutParams(-1, -2));
+
+        TextView status = new TextView(this);
+        status.setText(remoteMode ? (remoteConnected ? "✓ подключено" : "✕ нет подключения") : "Локально: Документы/MA2_passports");
+        status.setTextColor(remoteMode ? (remoteConnected ? BRAND_GREEN : BRAND_RED) : BRAND_SILVER);
+        status.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        status.setPadding(0, dp(6), 0, 0);
+        panel.addView(status, new LinearLayout.LayoutParams(-1, -2));
+
+        if (remoteMode) {
+            Button settings = new Button(this);
+            settings.setText("Настройка облака");
+            settings.setOnClickListener(v -> showSftpSettingsDialog());
+            panel.addView(settings, new LinearLayout.LayoutParams(-1, -2));
+        }
+        return panel;
     }
 
     private void showPresetSetupScreen() {
@@ -401,6 +560,7 @@ public class MainActivity extends ComponentActivity {
         root.setPadding(36, 36, 36, 36);
 
         TextView text = new TextView(this);
+        loadingText = text;
         text.setText(message);
         text.setTextSize(22);
         text.setGravity(Gravity.CENTER);
@@ -408,6 +568,12 @@ public class MainActivity extends ComponentActivity {
         text.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         root.addView(text, new LinearLayout.LayoutParams(-1, -2));
         setContentView(root);
+    }
+
+    private void updateLoading(String message) {
+        runOnUiThread(() -> {
+            if (loadingText != null) loadingText.setText(message);
+        });
     }
 
     private void showPartituraSetupScreen() {
@@ -429,17 +595,29 @@ public class MainActivity extends ComponentActivity {
         ArrayList<File> projects = projectDirs();
         if (selectedPartituraProjectDir == null && !projects.isEmpty()) selectedPartituraProjectDir = projects.get(0);
 
-        Button loadXmlButton = new Button(this);
-        loadXmlButton.setText("Загрузить XML");
-        loadXmlButton.setOnClickListener(v -> openPartituraXml());
-        root.addView(loadXmlButton, new LinearLayout.LayoutParams(-1, -2));
+        boolean openedFromProject = selectedPartituraProjectDir != null && projectModeDir != null
+                && selectedPartituraProjectDir.getAbsolutePath().equals(projectModeDir.getAbsolutePath());
+        if (!openedFromProject) {
+            Button loadXmlButton = new Button(this);
+            loadXmlButton.setText("Загрузить XML");
+            loadXmlButton.setOnClickListener(v -> openPartituraXml());
+            root.addView(loadXmlButton, new LinearLayout.LayoutParams(-1, -2));
 
-        Button openProjectButton = new Button(this);
-        openProjectButton.setText(selectedPartituraProjectDir == null
-                ? "Открыть проект"
-                : "Проект: " + displayTitle(projectTitleFromDir(selectedPartituraProjectDir)));
-        openProjectButton.setOnClickListener(v -> showProjectListScreen("partitura"));
-        root.addView(openProjectButton, new LinearLayout.LayoutParams(-1, -2));
+            Button openProjectButton = new Button(this);
+            openProjectButton.setText(selectedPartituraProjectDir == null
+                    ? "Открыть проект"
+                    : "Проект: " + displayTitle(projectTitleFromDir(selectedPartituraProjectDir)));
+            openProjectButton.setOnClickListener(v -> showProjectListScreen("partitura"));
+            root.addView(openProjectButton, new LinearLayout.LayoutParams(-1, -2));
+        } else {
+            TextView project = new TextView(this);
+            project.setText("Проект: " + displayTitle(projectTitleFromDir(selectedPartituraProjectDir)));
+            project.setTextColor(BRAND_SILVER);
+            project.setTextSize(18);
+            project.setGravity(Gravity.CENTER);
+            project.setPadding(0, dp(12), 0, dp(12));
+            root.addView(project, new LinearLayout.LayoutParams(-1, -2));
+        }
 
         TextView hint = new TextView(this);
         hint.setText("Включи нужные поля.");
@@ -463,7 +641,10 @@ public class MainActivity extends ComponentActivity {
 
         Button backButton = new Button(this);
         backButton.setText("Назад");
-        backButton.setOnClickListener(v -> showStartScreen());
+        backButton.setOnClickListener(v -> {
+            if (projectModeDir != null) showProjectModeScreen(projectModeDir, projectModeCloud);
+            else showStartScreen();
+        });
         root.addView(backButton, new LinearLayout.LayoutParams(-1, -2));
 
         setContentView(root);
@@ -778,6 +959,20 @@ public class MainActivity extends ComponentActivity {
         LinearLayout topPane = new LinearLayout(this);
         topPane.setOrientation(LinearLayout.VERTICAL);
 
+        LinearLayout navRow = buttonRow();
+        Button back = new Button(this);
+        back.setText("Назад");
+        back.setOnClickListener(v -> {
+            saveDescription();
+            savePassportQuietly();
+            if (projectModeDir != null) showProjectModeScreen(projectModeDir, projectModeCloud);
+            else showProjectListScreen("projects");
+        });
+        navRow.addView(back, new LinearLayout.LayoutParams(0, -2, 1));
+        TextView spacer = new TextView(this);
+        navRow.addView(spacer, new LinearLayout.LayoutParams(0, -2, 2));
+        topPane.addView(navRow, new LinearLayout.LayoutParams(-1, -2));
+
         currentText = new TextView(this);
         currentText.setTextSize(17);
         topPane.addView(currentText, new LinearLayout.LayoutParams(-1, -2));
@@ -837,6 +1032,28 @@ public class MainActivity extends ComponentActivity {
 
         LinearLayout bottomPane = new LinearLayout(this);
         bottomPane.setOrientation(LinearLayout.VERTICAL);
+
+        LinearLayout cameraRow = buttonRow();
+        TextView cameraLabel = new TextView(this);
+        cameraLabel.setText("Камера");
+        cameraLabel.setTextColor(BRAND_SILVER);
+        cameraLabel.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        cameraLabel.setGravity(Gravity.CENTER_VERTICAL);
+        cameraRow.addView(cameraLabel, new LinearLayout.LayoutParams(0, -2, 1));
+
+        cameraSpinner = new Spinner(this);
+        ArrayAdapter<String> cameraAdapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, new String[]{"Задняя камера", "Передняя камера"});
+        cameraAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        cameraSpinner.setAdapter(cameraAdapter);
+        cameraSpinner.setSelection(lensFacing == CameraSelector.LENS_FACING_FRONT ? 1 : 0);
+        cameraSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                lensFacing = position == 1 ? CameraSelector.LENS_FACING_FRONT : CameraSelector.LENS_FACING_BACK;
+            }
+            @Override public void onNothingSelected(AdapterView<?> parent) {}
+        });
+        cameraRow.addView(cameraSpinner, new LinearLayout.LayoutParams(0, -2, 2));
+        bottomPane.addView(cameraRow, new LinearLayout.LayoutParams(-1, -2));
 
         summaryText = new TextView(this);
         summaryText.setText(rows.isEmpty() ? "XML не загружен" : "Строк: " + rows.size());
@@ -1010,6 +1227,27 @@ public class MainActivity extends ComponentActivity {
     }
 
     private void showProjectListScreen(String mode) {
+        showProjectListScreen(mode, false);
+    }
+
+    private void showProjectListScreen(String mode, boolean remoteFresh) {
+        if (projectBrowserCloud) remoteMode = true;
+        if (!projectBrowserCloud) remoteMode = false;
+        if (projectBrowserCloud && !remoteFresh) {
+            showLoadingScreen("Обновляю проекты с сервера...");
+            cameraExecutor.execute(() -> {
+                boolean ok = refreshRemoteCache();
+                runOnUiThread(() -> {
+                    if (ok) {
+                        showProjectListScreen(mode, true);
+                    } else {
+                        Toast.makeText(this, "Не удалось обновить облако", Toast.LENGTH_LONG).show();
+                        showProjectSourceScreen();
+                    }
+                });
+            });
+            return;
+        }
         if (!ensureStorageAccess()) return;
         currentScreen = "project_list";
         cameraScreen = false;
@@ -1022,9 +1260,20 @@ public class MainActivity extends ComponentActivity {
         root.setPadding(24, 24, 24, 24);
 
         TextView title = new TextView(this);
-        title.setText("Проекты");
-        title.setTextSize(22);
+        title.setText(projectBrowserCloud ? "Проекты: облако" : "Проекты: устройство");
+        title.setTextSize(24);
+        title.setGravity(Gravity.CENTER);
+        title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         root.addView(title, new LinearLayout.LayoutParams(-1, -2));
+
+        if (!projectBrowserCloud) {
+            Button create = new Button(this);
+            create.setText("Создать новый проект");
+            create.setOnClickListener(v -> openXml());
+            LinearLayout.LayoutParams createParams = new LinearLayout.LayoutParams(-1, -2);
+            createParams.setMargins(0, dp(16), 0, dp(10));
+            root.addView(create, createParams);
+        }
 
         ScrollView scroll = new ScrollView(this);
         LinearLayout list = new LinearLayout(this);
@@ -1033,12 +1282,14 @@ public class MainActivity extends ComponentActivity {
         root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
 
         try {
-            File rootDir = passportsRootDir();
+            File rootDir = projectBrowserCloud ? remoteCacheRootDir() : localPassportsRootDir();
             File[] dirs = rootDir.listFiles(file -> file.isDirectory() && findProjectXml(file) != null);
             if (dirs == null || dirs.length == 0) {
                 TextView empty = new TextView(this);
-                empty.setText("Пока нет проектов");
+                empty.setText(projectBrowserCloud ? "В облаке пока нет проектов" : "Пока нет проектов");
                 empty.setPadding(0, dp(24), 0, 0);
+                empty.setTextColor(BRAND_MUTED);
+                empty.setGravity(Gravity.CENTER);
                 list.addView(empty, new LinearLayout.LayoutParams(-1, -2));
             } else {
                 for (File dir : dirs) {
@@ -1051,10 +1302,7 @@ public class MainActivity extends ComponentActivity {
 
         Button backButton = new Button(this);
         backButton.setText("Назад");
-        backButton.setOnClickListener(v -> {
-            if ("partitura".equals(projectListMode)) showPartituraSetupScreen();
-            else showPresetSetupScreen();
-        });
+        backButton.setOnClickListener(v -> showProjectSourceScreen());
         root.addView(backButton, new LinearLayout.LayoutParams(-1, -2));
         setContentView(root);
     }
@@ -1079,15 +1327,7 @@ public class MainActivity extends ComponentActivity {
         name.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         row.addView(name, new LinearLayout.LayoutParams(-1, -2));
 
-        View.OnClickListener openProject = v -> {
-            if ("partitura".equals(projectListMode)) {
-                selectedPartituraProjectDir = dir;
-                showPartituraSetupScreen();
-                Toast.makeText(this, "Проект выбран: " + displayTitle(projectTitleFromDir(dir)), Toast.LENGTH_LONG).show();
-            } else {
-                openExistingProjectDir(dir);
-            }
-        };
+        View.OnClickListener openProject = v -> showProjectModeScreen(dir, projectBrowserCloud);
         View.OnLongClickListener menu = v -> {
             showProjectMenu(dir);
             return true;
@@ -1100,15 +1340,154 @@ public class MainActivity extends ComponentActivity {
     }
 
     private void showProjectMenu(File dir) {
-        String[] actions = {"Файлы", "Переименовать", "Удалить"};
-        new AlertDialog.Builder(this)
+        LinearLayout actions = new LinearLayout(this);
+        actions.setOrientation(LinearLayout.VERTICAL);
+        actions.setPadding(dp(18), dp(12), dp(18), dp(8));
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
                 .setTitle(displayTitle(projectTitleFromDir(dir)))
-                .setItems(actions, (dialog, which) -> {
-                    if (which == 0) showProjectFilesScreen(dir, projectListMode);
-                    else if (which == 1) renameProject(dir);
-                    else if (which == 2) confirmDeleteProject(dir);
-                })
-                .show();
+                .setView(actions)
+                .create();
+
+        if (!projectBrowserCloud) {
+            actions.addView(menuButton("Открыть", v -> {
+                dialog.dismiss();
+                showProjectModeScreen(dir, false);
+            }));
+            actions.addView(menuButton("Переименовать", v -> {
+                dialog.dismiss();
+                renameProject(dir);
+            }));
+            actions.addView(menuButton("Загрузить в облако", v -> {
+                dialog.dismiss();
+                saveProjectToRemoteWithConfirm(dir);
+            }));
+            actions.addView(menuButton("Удалить", v -> {
+                dialog.dismiss();
+                confirmDeleteProject(dir);
+            }));
+        } else {
+            actions.addView(menuButton("Переименовать", v -> {
+                dialog.dismiss();
+                renameProject(dir);
+            }));
+            actions.addView(menuButton("Загрузить на устройство", v -> {
+                dialog.dismiss();
+                saveProjectToLocal(dir);
+            }));
+            actions.addView(menuButton("Удалить", v -> {
+                dialog.dismiss();
+                confirmDeleteProject(dir);
+            }));
+        }
+        dialog.show();
+    }
+
+    private Button menuButton(String title, View.OnClickListener listener) {
+        Button button = new Button(this);
+        button.setText(title);
+        button.setTextSize(18);
+        button.setOnClickListener(listener);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, dp(58));
+        params.setMargins(0, dp(7), 0, dp(7));
+        button.setLayoutParams(params);
+        return button;
+    }
+
+    private void showProjectModeScreen(File dir, boolean cloudProject) {
+        currentScreen = "project_mode";
+        cameraScreen = false;
+        filesScreenProjectDir = null;
+        projectModeDir = dir;
+        projectModeCloud = cloudProject;
+        stopCamera();
+
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(dp(24), dp(24), dp(24), dp(24));
+
+        TextView title = new TextView(this);
+        title.setText(displayTitle(projectTitleFromDir(dir)));
+        title.setTextSize(24);
+        title.setGravity(Gravity.CENTER);
+        title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        root.addView(title, new LinearLayout.LayoutParams(-1, -2));
+
+        addSpacer(root, 1);
+        root.addView(projectKindButton(dir, cloudProject, "presets"));
+        root.addView(projectKindButton(dir, cloudProject, "partitura"));
+        addSpacer(root, 1);
+
+        Button back = new Button(this);
+        back.setText("Назад");
+        back.setOnClickListener(v -> showProjectListScreen("projects", !projectBrowserCloud));
+        root.addView(back, new LinearLayout.LayoutParams(-1, -2));
+
+        setContentView(root);
+    }
+
+    private View projectKindButton(File dir, boolean cloudProject, String kind) {
+        Button button = new Button(this);
+        button.setText("presets".equals(kind) ? "Пресеты" : "Партитура");
+        button.setTextSize(22);
+        button.setMinHeight(dp(82));
+        button.setOnClickListener(v -> {
+            if (cloudProject) {
+                showProjectFilesScreen(dir, kind);
+            } else if ("presets".equals(kind)) {
+                openExistingProjectDir(dir);
+            } else {
+                selectedPartituraProjectDir = dir;
+                showPartituraSetupScreen();
+            }
+        });
+        button.setOnLongClickListener(v -> {
+            showProjectKindMenu(dir, cloudProject, kind);
+            return true;
+        });
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, dp(88));
+        params.setMargins(0, dp(10), 0, dp(10));
+        button.setLayoutParams(params);
+        return button;
+    }
+
+    private void showProjectKindMenu(File dir, boolean cloudProject, String kind) {
+        LinearLayout actions = new LinearLayout(this);
+        actions.setOrientation(LinearLayout.VERTICAL);
+        actions.setPadding(dp(18), dp(12), dp(18), dp(8));
+        String title = ("presets".equals(kind) ? "Пресеты" : "Партитура") + ": " + displayTitle(projectTitleFromDir(dir));
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle(title)
+                .setView(actions)
+                .create();
+        if (!cloudProject) {
+            actions.addView(menuButton("Открыть", v -> {
+                dialog.dismiss();
+                if ("presets".equals(kind)) openExistingProjectDir(dir);
+                else {
+                    selectedPartituraProjectDir = dir;
+                    showPartituraSetupScreen();
+                }
+            }));
+        }
+        if (!cloudProject) {
+            actions.addView(menuButton("Файлы", v -> {
+                dialog.dismiss();
+                showProjectFilesScreen(dir, kind);
+            }));
+        }
+        if (cloudProject) {
+            actions.addView(menuButton("Загрузить на устройство", v -> {
+                dialog.dismiss();
+                saveProjectToLocal(dir);
+            }));
+        } else {
+            actions.addView(menuButton("Загрузить в облако", v -> {
+                dialog.dismiss();
+                saveProjectToRemoteWithConfirm(dir);
+            }));
+        }
+        dialog.show();
     }
 
     private void openProjectFiles(File dir) {
@@ -1140,6 +1519,26 @@ public class MainActivity extends ComponentActivity {
     }
 
     private void showProjectFilesScreen(File dir, String kind) {
+        if (projectModeCloud) remoteMode = true;
+        if (projectModeCloud) {
+            showLoadingScreen("Обновляю файлы проекта...");
+            cameraExecutor.execute(() -> {
+                try {
+                    File fresh = refreshRemoteProjectDir(dir.getName());
+                    runOnUiThread(() -> showProjectFilesScreenReady(fresh, kind));
+                } catch (Exception e) {
+                    runOnUiThread(() -> {
+                        Toast.makeText(this, "Сервер: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                        showProjectModeScreen(dir, true);
+                    });
+                }
+            });
+            return;
+        }
+        showProjectFilesScreenReady(dir, kind);
+    }
+
+    private void showProjectFilesScreenReady(File dir, String kind) {
         currentScreen = "project_files";
         cameraScreen = false;
         filesScreenProjectDir = dir;
@@ -1177,7 +1576,10 @@ public class MainActivity extends ComponentActivity {
 
         Button back = new Button(this);
         back.setText("Назад");
-        back.setOnClickListener(v -> showProjectListScreen(filesScreenKind));
+        back.setOnClickListener(v -> {
+            if (projectModeDir != null) showProjectModeScreen(projectModeDir, projectModeCloud);
+            else showProjectListScreen(filesScreenKind);
+        });
         root.addView(back, new LinearLayout.LayoutParams(-1, -2));
 
         setContentView(root);
@@ -1341,6 +1743,10 @@ public class MainActivity extends ComponentActivity {
                             File renamedXml = new File(newDir, safe(title) + ".xml");
                             if (!xml.getName().equals(renamedXml.getName())) xml.renameTo(renamedXml);
                         }
+                        if (remoteMode) {
+                            deleteRemoteProject(dir.getName());
+                            syncProjectToRemote(newDir);
+                        }
                         showProjectListScreen();
                     } catch (Exception e) {
                         Toast.makeText(this, "Переименование: " + e.getMessage(), Toast.LENGTH_LONG).show();
@@ -1356,6 +1762,7 @@ public class MainActivity extends ComponentActivity {
                 .setMessage(displayTitle(projectTitleFromDir(dir)))
                 .setPositiveButton("Удалить", (dialog, which) -> {
                     deleteRecursive(dir);
+                    if (remoteMode) deleteRemoteProject(dir.getName());
                     showProjectListScreen();
                 })
                 .setNegativeButton("Отмена", null)
@@ -1382,6 +1789,16 @@ public class MainActivity extends ComponentActivity {
         saveDescription();
         if (cameraScreen) {
             showCameraScreen();
+        } else if ("project_files".equals(currentScreen) && filesScreenProjectDir != null) {
+            showProjectFilesScreenReady(filesScreenProjectDir, filesScreenKind);
+        } else if ("project_mode".equals(currentScreen) && projectModeDir != null) {
+            showProjectModeScreen(projectModeDir, projectModeCloud);
+        } else if ("project_list".equals(currentScreen)) {
+            showProjectListScreen(projectListMode, true);
+        } else if ("project_source".equals(currentScreen)) {
+            showProjectSourceScreen();
+        } else if ("partitura_setup".equals(currentScreen)) {
+            showPartituraSetupScreen();
         } else if (projectDir != null && !rows.isEmpty()) {
             showPresetWorkspace();
         } else {
@@ -1415,16 +1832,25 @@ public class MainActivity extends ComponentActivity {
         }
         if ("project_files".equals(currentScreen) || filesScreenProjectDir != null) {
             filesScreenProjectDir = null;
-            showProjectListScreen(filesScreenKind);
+            if (projectModeDir != null) showProjectModeScreen(projectModeDir, projectModeCloud);
+            else showProjectListScreen(filesScreenKind);
+            return;
+        }
+        if ("project_mode".equals(currentScreen)) {
+            showProjectListScreen("projects", !projectBrowserCloud);
             return;
         }
         if ("project_list".equals(currentScreen)) {
-            if ("partitura".equals(projectListMode)) showPartituraSetupScreen();
-            else showPresetSetupScreen();
+            showProjectSourceScreen();
+            return;
+        }
+        if ("project_source".equals(currentScreen)) {
+            showStartScreen();
             return;
         }
         if ("preset_setup".equals(currentScreen) || "partitura_setup".equals(currentScreen)) {
-            showStartScreen();
+            if (projectModeDir != null) showProjectModeScreen(projectModeDir, projectModeCloud);
+            else showStartScreen();
             return;
         }
         if ("loading".equals(currentScreen)) {
@@ -1567,14 +1993,16 @@ public class MainActivity extends ComponentActivity {
     }
 
     private void openExistingProjectDir(File dir) {
+        remoteMode = false;
         showLoadingScreen("Открываю проект...");
         cameraExecutor.execute(() -> {
             try {
-                File xmlCopy = findProjectXml(dir);
+                File freshDir = dir;
+                File xmlCopy = findProjectXml(freshDir);
                 if (xmlCopy == null || !xmlCopy.exists()) {
                     throw new Exception("В папке нет XML");
                 }
-                projectDir = dir;
+                projectDir = freshDir;
                 photosDir = new File(projectDir, "photos");
                 if (!photosDir.exists() && !photosDir.mkdirs()) {
                     throw new Exception("Не могу открыть photos");
@@ -1591,7 +2019,8 @@ public class MainActivity extends ComponentActivity {
             } catch (Exception e) {
                 runOnUiThread(() -> {
                     Toast.makeText(this, "Проект: " + e.getMessage(), Toast.LENGTH_LONG).show();
-                    showProjectListScreen();
+                    if (projectModeDir != null) showProjectModeScreen(projectModeDir, projectModeCloud);
+                    else showProjectListScreen();
                 });
             }
         });
@@ -1674,6 +2103,14 @@ public class MainActivity extends ComponentActivity {
     }
 
     private File passportsRootDir() throws Exception {
+        if (remoteMode) {
+            if (!ensureRemoteReady()) throw new Exception("Нет подключения к удаленному серверу");
+            File root = remoteCacheRootDir();
+            if (!root.exists() && !root.mkdirs()) {
+                throw new Exception("Не могу создать кэш " + root.getAbsolutePath());
+            }
+            return root;
+        }
         File documents = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS);
         File root = new File(documents, "MA2_passports");
         File oldRoot = new File(documents, "MA2_pasports");
@@ -1696,6 +2133,503 @@ public class MainActivity extends ComponentActivity {
         return root;
     }
 
+    private File localPassportsRootDir() throws Exception {
+        File documents = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS);
+        File root = new File(documents, "MA2_passports");
+        if (!root.exists() && !root.mkdirs()) {
+            throw new Exception("Не могу создать папку " + root.getAbsolutePath());
+        }
+        return root;
+    }
+
+    private File remoteCacheRootDir() {
+        return new File(getFilesDir(), "remote_cache/MA2_passports");
+    }
+
+    private void loadServerSettings() {
+        SharedPreferences prefs = getSharedPreferences("cloud", MODE_PRIVATE);
+        remoteMode = prefs.getBoolean("remoteMode", false);
+        cloudUrl = prefs.getString("url", prefs.getString("host", ""));
+        cloudPort = prefs.getInt("port", 22);
+        cloudUser = prefs.getString("user", "");
+        cloudPassword = prefs.getString("password", "");
+        remoteBasePath = prefs.getString("remoteDir", REMOTE_ROOT_NAME);
+    }
+
+    private void saveServerSettings() {
+        getSharedPreferences("cloud", MODE_PRIVATE).edit()
+                .putBoolean("remoteMode", remoteMode)
+                .putString("url", cloudUrl)
+                .putInt("port", cloudPort)
+                .putString("user", cloudUser)
+                .putString("password", cloudPassword)
+                .putString("remoteDir", remoteBasePath == null || remoteBasePath.isEmpty() ? REMOTE_ROOT_NAME : remoteBasePath)
+                .apply();
+    }
+
+    private void tryConnectRemoteOnStart() {
+        if (cloudUrl == null || cloudUrl.trim().isEmpty() || cloudUser == null || cloudUser.trim().isEmpty()) {
+            remoteConnected = false;
+            return;
+        }
+        Executors.newSingleThreadExecutor().execute(() -> {
+            boolean ok = ensureRemoteReady();
+            runOnUiThread(() -> {
+                remoteConnected = ok;
+                if ("start".equals(currentScreen)) showStartScreen();
+            });
+        });
+    }
+
+    private void showSftpSettingsDialog() {
+        LinearLayout form = new LinearLayout(this);
+        form.setOrientation(LinearLayout.VERTICAL);
+        form.setPadding(dp(18), dp(10), dp(18), 0);
+        EditText host = dialogInput("SFTP сервер", cloudUrl);
+        EditText port = dialogInput("Порт", String.valueOf(cloudPort));
+        EditText user = dialogInput("Пользователь", cloudUser);
+        EditText password = dialogInput("Пароль", cloudPassword);
+        EditText remoteDir = dialogInput("Папка", remoteBasePath == null || remoteBasePath.isEmpty() ? REMOTE_ROOT_NAME : remoteBasePath);
+        password.setInputType(0x00000081);
+        form.addView(host);
+        form.addView(port);
+        form.addView(user);
+        form.addView(password);
+        form.addView(remoteDir);
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("Настройка облака")
+                .setView(form)
+                .setNegativeButton("Назад", null)
+                .setPositiveButton("Подключить и сохранить", null)
+                .create();
+        dialog.setOnShowListener(d -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            cloudUrl = host.getText().toString().trim();
+            try {
+                cloudPort = Integer.parseInt(port.getText().toString().trim());
+            } catch (Exception e) {
+                Toast.makeText(this, "Порт должен быть числом", Toast.LENGTH_LONG).show();
+                return;
+            }
+            cloudUser = user.getText().toString().trim();
+            cloudPassword = password.getText().toString();
+            remoteBasePath = remoteDir.getText().toString().trim().isEmpty() ? REMOTE_ROOT_NAME : remoteDir.getText().toString().trim();
+            remoteMode = true;
+            saveServerSettings();
+            Toast.makeText(this, "Подключаюсь...", Toast.LENGTH_SHORT).show();
+            Executors.newSingleThreadExecutor().execute(() -> {
+                boolean ok = ensureRemoteReady();
+                runOnUiThread(() -> {
+                    if (ok) {
+                        dialog.dismiss();
+                        showStartScreen();
+                    } else {
+                        Toast.makeText(this, "Не удалось подключиться", Toast.LENGTH_LONG).show();
+                    }
+                });
+            });
+        }));
+        dialog.show();
+    }
+
+    private EditText dialogInput(String hint, String value) {
+        EditText edit = new EditText(this);
+        edit.setHint(hint);
+        edit.setText(value);
+        edit.setSingleLine(true);
+        edit.setTextColor(BRAND_TEXT);
+        edit.setHintTextColor(BRAND_MUTED);
+        return edit;
+    }
+
+    private boolean ensureRemoteReady() {
+        if (!remoteMode) return true;
+        if (remoteConnected) return true;
+        if (cloudUrl.isEmpty() || cloudUser.isEmpty()) return false;
+        try {
+            SftpHandle handle = openCloud();
+            handle.close();
+            remoteConnected = true;
+            return true;
+        } catch (Exception e) {
+            remoteConnected = false;
+            return false;
+        }
+    }
+
+    private boolean refreshRemoteCache() {
+        if (!remoteMode) return true;
+        if (cloudUrl.isEmpty() || cloudUser.isEmpty()) return false;
+        try {
+            SftpHandle handle = openCloud();
+            deleteRecursive(remoteCacheRootDir());
+            downloadRemoteProjectIndex(handle.sftp, remoteBasePath, remoteCacheRootDir());
+            handle.close();
+            remoteConnected = true;
+            return true;
+        } catch (Exception e) {
+            remoteConnected = false;
+            return false;
+        }
+    }
+
+    private File refreshRemoteProjectDir(String projectName) throws Exception {
+        if (!remoteMode) return new File(remoteCacheRootDir(), projectName);
+        SftpHandle handle = openCloud();
+        File target = new File(remoteCacheRootDir(), projectName);
+        deleteRecursive(target);
+        downloadRemoteDir(handle.sftp, sftpPath(remoteBasePath, projectName), target, null);
+        handle.close();
+        remoteConnected = true;
+        return target;
+    }
+
+    private void syncProjectToRemote(File dir) {
+        if (!remoteMode || dir == null || !dir.exists()) return;
+        Executors.newSingleThreadExecutor().execute(() -> {
+            try {
+                requireProjectXml(dir);
+                SftpHandle handle = openCloud();
+                String remoteProject = sftpPath(remoteBasePath, dir.getName());
+                uploadRemoteDirAtomic(handle.sftp, dir, remoteProject, null);
+                handle.close();
+                mirrorProjectToRemoteCache(dir);
+                remoteConnected = true;
+            } catch (Exception ignored) {
+                remoteConnected = false;
+            }
+        });
+    }
+
+    private void saveProjectToRemoteWithToast(File dir) {
+        showLoadingScreen("Загружаю проект в облако...");
+        Executors.newSingleThreadExecutor().execute(() -> {
+            boolean ok = false;
+            String error = "";
+            try {
+                requireProjectXml(dir);
+                SftpHandle handle = openCloud();
+                String remoteProject = sftpPath(remoteBasePath, dir.getName());
+                uploadRemoteDirAtomic(handle.sftp, dir, remoteProject, (done, total, name) -> updateLoading("Загружаю " + done + "/" + total + ": " + name));
+                handle.close();
+                mirrorProjectToRemoteCache(dir);
+                ok = true;
+            } catch (Exception exc) {
+                error = exc.getMessage();
+                remoteConnected = false;
+            }
+            boolean result = ok;
+            String message = error;
+            runOnUiThread(() -> {
+                Toast.makeText(this, result ? "Сохранено в облако" : "Не удалось сохранить в облако: " + message, Toast.LENGTH_LONG).show();
+                if (projectModeDir != null) showProjectModeScreen(projectModeDir, projectModeCloud);
+                else showProjectListScreen("projects", !projectBrowserCloud);
+            });
+        });
+    }
+
+    private void saveProjectToRemoteWithConfirm(File dir) {
+        File cachedRemoteProject = new File(remoteCacheRootDir(), dir.getName());
+        if (cachedRemoteProject.exists()) {
+            new AlertDialog.Builder(this)
+                    .setTitle("Такой проект уже есть в облаке")
+                    .setMessage("Заменить?")
+                    .setPositiveButton("Заменить", (d, w) -> saveProjectToRemoteWithToast(dir))
+                    .setNegativeButton("Отмена", null)
+                    .show();
+        } else {
+            saveProjectToRemoteWithToast(dir);
+        }
+    }
+
+    private void saveProjectToLocal(File dir) {
+        try {
+            File target = new File(localPassportsRootDir(), dir.getName());
+            if (target.exists()) {
+                new AlertDialog.Builder(this)
+                        .setTitle("Такой проект уже есть локально")
+                        .setMessage("Заменить?")
+                        .setPositiveButton("Заменить", (d, w) -> {
+                            downloadProjectToLocal(dir, target, true);
+                        })
+                        .setNegativeButton("Отмена", null)
+                        .show();
+            } else {
+                downloadProjectToLocal(dir, target, false);
+            }
+        } catch (Exception e) {
+            Toast.makeText(this, "Локально: " + e.getMessage(), Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void downloadProjectToLocal(File sourceDir, File target, boolean replace) {
+        showLoadingScreen("Скачиваю проект...");
+        Executors.newSingleThreadExecutor().execute(() -> {
+            boolean ok = false;
+            String error = "";
+            try {
+                if (projectBrowserCloud) {
+                    SftpHandle handle = openCloud();
+                    if (replace) deleteRecursive(target);
+                    downloadRemoteDir(handle.sftp, sftpPath(remoteBasePath, sourceDir.getName()), target, (done, total, name) -> updateLoading("Скачиваю " + done + "/" + total + ": " + name));
+                    handle.close();
+                } else {
+                    if (replace) deleteRecursive(target);
+                    copyRecursive(sourceDir, target);
+                }
+                ok = true;
+            } catch (Exception exc) {
+                error = exc.getMessage();
+            }
+            boolean result = ok;
+            String message = error;
+            runOnUiThread(() -> {
+                Toast.makeText(this, result ? "Сохранено локально" : "Не удалось скачать: " + message, Toast.LENGTH_LONG).show();
+                if (result) {
+                    projectBrowserCloud = false;
+                    remoteMode = false;
+                    showProjectListScreen("projects");
+                } else {
+                    showProjectModeScreen(sourceDir, projectBrowserCloud);
+                }
+            });
+        });
+    }
+
+    private void deleteRemoteProject(String projectName) {
+        if (!remoteMode || projectName == null) return;
+        Executors.newSingleThreadExecutor().execute(() -> {
+            try {
+                SftpHandle handle = openCloud();
+                removeRemoteTree(handle.sftp, sftpPath(remoteBasePath, projectName));
+                handle.close();
+            } catch (Exception ignored) {
+            }
+        });
+    }
+
+    private static class CloudEntry {
+        final String name;
+        final boolean directory;
+        CloudEntry(String name, boolean directory) {
+            this.name = name;
+            this.directory = directory;
+        }
+    }
+
+    private interface TransferProgress {
+        void onProgress(int done, int total, String name);
+    }
+
+    private static class RemoteFile {
+        final String remotePath;
+        final String relativePath;
+        RemoteFile(String remotePath, String relativePath) {
+            this.remotePath = remotePath;
+            this.relativePath = relativePath;
+        }
+    }
+
+    private static class SftpHandle {
+        final Session session;
+        final ChannelSftp sftp;
+        SftpHandle(Session session, ChannelSftp sftp) {
+            this.session = session;
+            this.sftp = sftp;
+        }
+        void close() {
+            try { sftp.disconnect(); } catch (Exception ignored) {}
+            try { session.disconnect(); } catch (Exception ignored) {}
+        }
+    }
+
+    private SftpHandle openCloud() throws Exception {
+        JSch jsch = new JSch();
+        Session session = jsch.getSession(cloudUser, cloudUrl, cloudPort);
+        session.setPassword(cloudPassword);
+        java.util.Properties config = new java.util.Properties();
+        config.put("StrictHostKeyChecking", "no");
+        session.setConfig(config);
+        session.connect(15000);
+        ChannelSftp sftp = (ChannelSftp) session.openChannel("sftp");
+        sftp.connect(15000);
+        if (remoteBasePath == null || remoteBasePath.trim().isEmpty()) remoteBasePath = REMOTE_ROOT_NAME;
+        ensureRemoteDir(sftp, remoteBasePath);
+        return new SftpHandle(session, sftp);
+    }
+
+    private String sftpPath(String a, String b) {
+        String base = a == null ? "" : a.replace("\\", "/");
+        String child = b == null ? "" : b.replace("\\", "/");
+        if (base.endsWith("/")) base = base.substring(0, base.length() - 1);
+        while (child.startsWith("/")) child = child.substring(1);
+        return base.isEmpty() ? child : base + "/" + child;
+    }
+
+    private boolean remoteExists(ChannelSftp sftp, String path) {
+        try {
+            sftp.stat(path);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private boolean remoteIsDir(ChannelSftp sftp, String path) {
+        try {
+            return sftp.stat(path).isDir();
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private void ensureRemoteDir(ChannelSftp sftp, String path) throws Exception {
+        String clean = path.replace("\\", "/");
+        String current = clean.startsWith("/") ? "/" : "";
+        for (String part : clean.split("/")) {
+            if (part.isEmpty()) continue;
+            current = sftpPath(current, part);
+            try {
+                sftp.mkdir(current);
+            } catch (SftpException ignored) {
+            }
+        }
+    }
+
+    private void removeRemoteTree(ChannelSftp sftp, String path) {
+        try {
+            if (!remoteExists(sftp, path)) return;
+            if (remoteIsDir(sftp, path)) {
+                Vector<ChannelSftp.LsEntry> entries = sftp.ls(path);
+                for (ChannelSftp.LsEntry entry : entries) {
+                    String name = entry.getFilename();
+                    if (".".equals(name) || "..".equals(name)) continue;
+                    removeRemoteTree(sftp, sftpPath(path, name));
+                }
+                sftp.rmdir(path);
+            } else {
+                sftp.rm(path);
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    private ArrayList<CloudEntry> listRemoteDir(ChannelSftp sftp, String remote) throws Exception {
+        ArrayList<CloudEntry> result = new ArrayList<>();
+        Vector<ChannelSftp.LsEntry> entries = sftp.ls(remote);
+        for (ChannelSftp.LsEntry entry : entries) {
+            String name = entry.getFilename();
+            if (".".equals(name) || "..".equals(name)) continue;
+            result.add(new CloudEntry(name, entry.getAttrs().isDir()));
+        }
+        return result;
+    }
+
+    private ArrayList<RemoteFile> collectRemoteFiles(ChannelSftp sftp, String remote, String relative) throws Exception {
+        ArrayList<RemoteFile> files = new ArrayList<>();
+        for (CloudEntry entry : listRemoteDir(sftp, remote)) {
+            String childRemote = sftpPath(remote, entry.name);
+            String childRelative = relative.isEmpty() ? entry.name : relative + "/" + entry.name;
+            if (entry.directory) files.addAll(collectRemoteFiles(sftp, childRemote, childRelative));
+            else files.add(new RemoteFile(childRemote, childRelative));
+        }
+        return files;
+    }
+
+    private ArrayList<File> localProjectFiles(File root) {
+        ArrayList<File> files = new ArrayList<>();
+        collectLocalFiles(root, files);
+        files.sort(Comparator
+                .comparingInt((File file) -> file.getName().toLowerCase(Locale.ROOT).endsWith(".xml") ? 0 : 1)
+                .thenComparing(file -> root.toPath().relativize(file.toPath()).toString().toLowerCase(Locale.ROOT)));
+        return files;
+    }
+
+    private void collectLocalFiles(File file, ArrayList<File> files) {
+        if (file.isFile()) {
+            files.add(file);
+            return;
+        }
+        File[] children = file.listFiles();
+        if (children == null) return;
+        for (File child : children) collectLocalFiles(child, files);
+    }
+
+    private void uploadRemoteDirAtomic(ChannelSftp sftp, File local, String remote, TransferProgress progress) throws Exception {
+        requireProjectXml(local);
+        String temp = remote + ".upload";
+        removeRemoteTree(sftp, temp);
+        ensureRemoteDir(sftp, temp);
+        try {
+            ArrayList<File> files = localProjectFiles(local);
+            for (int i = 0; i < files.size(); i++) {
+                File file = files.get(i);
+                String relative = local.toPath().relativize(file.toPath()).toString().replace("\\", "/");
+                if (progress != null) progress.onProgress(i + 1, files.size(), relative);
+                String parent = temp;
+                String[] parts = relative.split("/");
+                for (int p = 0; p < parts.length - 1; p++) {
+                    parent = sftpPath(parent, parts[p]);
+                    ensureRemoteDir(sftp, parent);
+                }
+                sftp.put(file.getAbsolutePath(), sftpPath(parent, parts[parts.length - 1]));
+            }
+            removeRemoteTree(sftp, remote);
+            sftp.rename(temp, remote);
+        } catch (Exception e) {
+            removeRemoteTree(sftp, temp);
+            throw e;
+        }
+    }
+
+    private void downloadRemoteDir(ChannelSftp sftp, String remote, File local, TransferProgress progress) throws Exception {
+        ArrayList<RemoteFile> files = collectRemoteFiles(sftp, remote, "");
+        File temp = new File(local.getParentFile(), "." + local.getName() + ".download");
+        deleteRecursive(temp);
+        if (!temp.mkdirs()) throw new Exception("Не могу создать " + temp.getAbsolutePath());
+        try {
+            for (int i = 0; i < files.size(); i++) {
+                RemoteFile file = files.get(i);
+                if (progress != null) progress.onProgress(i + 1, files.size(), file.relativePath);
+                File target = new File(temp, file.relativePath);
+                File parent = target.getParentFile();
+                if (parent != null && !parent.exists()) parent.mkdirs();
+                sftp.get(file.remotePath, target.getAbsolutePath());
+            }
+            if (findProjectXml(temp) == null) throw new Exception("В скачанном проекте нет XML");
+            deleteRecursive(local);
+            if (!temp.renameTo(local)) throw new Exception("Не могу заменить проект");
+        } catch (Exception e) {
+            deleteRecursive(temp);
+            throw e;
+        }
+    }
+
+    private void downloadRemoteProjectIndex(ChannelSftp sftp, String remoteRoot, File localRoot) throws Exception {
+        if (!localRoot.exists()) localRoot.mkdirs();
+        for (CloudEntry project : listRemoteDir(sftp, remoteRoot)) {
+            if (!project.directory) continue;
+            String remoteProject = sftpPath(remoteRoot, project.name);
+            boolean hasXml = false;
+            for (CloudEntry entry : listRemoteDir(sftp, remoteProject)) {
+                if (!entry.directory && entry.name.toLowerCase(Locale.ROOT).endsWith(".xml")) hasXml = true;
+            }
+            if (!hasXml) continue;
+            File localProject = new File(localRoot, project.name);
+            if (!localProject.exists()) localProject.mkdirs();
+            for (CloudEntry entry : listRemoteDir(sftp, remoteProject)) {
+                if (entry.directory) continue;
+                sftp.get(sftpPath(remoteProject, entry.name), new File(localProject, entry.name).getAbsolutePath());
+            }
+        }
+    }
+
+    private void mirrorProjectToRemoteCache(File dir) throws Exception {
+        File target = new File(remoteCacheRootDir(), dir.getName());
+        if (target.equals(dir)) return;
+        deleteRecursive(target);
+        copyRecursive(dir, target);
+    }
+
     private void loadProjectData(File xmlCopy, boolean newProject) throws Exception {
         items.clear();
         items.addAll(parsePresets(xmlCopy));
@@ -1705,8 +2639,10 @@ public class MainActivity extends ComponentActivity {
 
         rows.clear();
         File table = passportTableFile();
-        if (!newProject && table.exists()) {
-            List<PassportRow> tableRows = Xlsx.readPassportRows(table);
+        if (!newProject) {
+            List<PassportRow> stateRows = readPassportState();
+            List<PassportRow> xlsxRows = table.exists() ? Xlsx.readPassportRows(table) : new ArrayList<>();
+            List<PassportRow> tableRows = mergeExistingRows(stateRows, xlsxRows);
             LinkedHashMap<String, Integer> seen = new LinkedHashMap<>();
             for (PassportRow row : tableRows) {
                 PresetItem item = itemByKey.get(rowKey(row.presetLabel, row.fixtureId));
@@ -1715,7 +2651,9 @@ public class MainActivity extends ComponentActivity {
                 String key = rowKey(row.presetLabel, row.fixtureId);
                 int duplicateIndex = seen.containsKey(key) ? seen.get(key) + 1 : 1;
                 seen.put(key, duplicateIndex);
-                row.photoFile = findPhotoForRow(row, duplicateIndex);
+                if (row.photoFile == null || !row.photoFile.exists()) {
+                    row.photoFile = findPhotoForRow(row, duplicateIndex);
+                }
                 rows.add(row);
             }
         }
@@ -1737,6 +2675,49 @@ public class MainActivity extends ComponentActivity {
                 rows.add(new PassportRow(item.presetLabel, item.fixtureId, item.presetNo, findPhoto(item), ""));
             }
         }
+    }
+
+    private List<PassportRow> mergeExistingRows(List<PassportRow> stateRows, List<PassportRow> xlsxRows) {
+        if (stateRows == null || stateRows.isEmpty()) return xlsxRows == null ? new ArrayList<>() : xlsxRows;
+        if (xlsxRows == null || xlsxRows.isEmpty()) return stateRows;
+
+        LinkedHashMap<String, PassportRow> xlsxByOccurrence = new LinkedHashMap<>();
+        LinkedHashMap<String, Integer> xlsxCounts = new LinkedHashMap<>();
+        for (PassportRow row : xlsxRows) {
+            String baseKey = rowKey(row.presetLabel, row.fixtureId);
+            int index = xlsxCounts.containsKey(baseKey) ? xlsxCounts.get(baseKey) : 0;
+            xlsxCounts.put(baseKey, index + 1);
+            xlsxByOccurrence.put(baseKey + "\n" + index, row);
+        }
+
+        LinkedHashSet<String> usedXlsxRows = new LinkedHashSet<>();
+        LinkedHashMap<String, Integer> stateCounts = new LinkedHashMap<>();
+        ArrayList<PassportRow> merged = new ArrayList<>();
+        for (PassportRow row : stateRows) {
+            String baseKey = rowKey(row.presetLabel, row.fixtureId);
+            int index = stateCounts.containsKey(baseKey) ? stateCounts.get(baseKey) : 0;
+            stateCounts.put(baseKey, index + 1);
+            String occurrence = baseKey + "\n" + index;
+            PassportRow copy = new PassportRow(row.presetLabel, row.fixtureId, row.presetNo, row.photoFile, row.description);
+            PassportRow xlsxRow = xlsxByOccurrence.get(occurrence);
+            if (xlsxRow != null) {
+                copy.description = xlsxRow.description;
+                usedXlsxRows.add(occurrence);
+            }
+            merged.add(copy);
+        }
+
+        xlsxCounts.clear();
+        for (PassportRow row : xlsxRows) {
+            String baseKey = rowKey(row.presetLabel, row.fixtureId);
+            int index = xlsxCounts.containsKey(baseKey) ? xlsxCounts.get(baseKey) : 0;
+            xlsxCounts.put(baseKey, index + 1);
+            String occurrence = baseKey + "\n" + index;
+            if (!usedXlsxRows.contains(occurrence)) {
+                merged.add(row);
+            }
+        }
+        return merged;
     }
 
     private void toggleRun() {
@@ -1884,6 +2865,7 @@ public class MainActivity extends ComponentActivity {
         File pdfOut = new File(projectDir, safe(showTitle) + "_пресеты.pdf");
         File pdfTmp = new File(projectDir, safe(showTitle) + "_пресеты.tmp.pdf");
         synchronized (passportWriteLock) {
+            writePassportState();
             Xlsx.writePassport(tmp, displayTitle(showTitle), rows);
             writePassportPdf(pdfTmp, displayTitle(showTitle), rows);
             if (out.exists() && !out.delete()) {
@@ -1901,6 +2883,60 @@ public class MainActivity extends ComponentActivity {
                 pdfTmp.delete();
             }
         }
+    }
+
+    private File passportStateFile() {
+        return new File(projectDir, "passport_state.json");
+    }
+
+    private void writePassportState() throws Exception {
+        if (projectDir == null) return;
+        JSONArray array = new JSONArray();
+        for (PassportRow row : rows) {
+            JSONObject item = new JSONObject();
+            item.put("presetLabel", row.presetLabel == null ? "" : row.presetLabel);
+            item.put("fixtureId", row.fixtureId == null ? "" : row.fixtureId);
+            item.put("presetNo", row.presetNo == null ? "" : row.presetNo);
+            item.put("photoName", row.photoFile == null ? JSONObject.NULL : row.photoFile.getName());
+            item.put("description", row.description == null ? "" : row.description);
+            array.put(item);
+        }
+        JSONObject root = new JSONObject();
+        root.put("rows", array);
+        try (FileOutputStream out = new FileOutputStream(passportStateFile())) {
+            out.write(root.toString(2).getBytes(StandardCharsets.UTF_8));
+        }
+    }
+
+    private List<PassportRow> readPassportState() {
+        ArrayList<PassportRow> result = new ArrayList<>();
+        if (projectDir == null) return result;
+        File stateFile = passportStateFile();
+        if (!stateFile.exists()) return result;
+        try {
+            String raw = new String(Xlsx.readAll(new FileInputStream(stateFile)), StandardCharsets.UTF_8);
+            JSONArray array = new JSONObject(raw).optJSONArray("rows");
+            if (array == null) return result;
+            for (int i = 0; i < array.length(); i++) {
+                JSONObject item = array.optJSONObject(i);
+                if (item == null) continue;
+                String photoName = item.optString("photoName", "");
+                File photo = null;
+                if (!photoName.isEmpty() && photosDir != null) {
+                    File candidate = new File(photosDir, photoName);
+                    if (candidate.exists()) photo = candidate;
+                }
+                result.add(new PassportRow(
+                        item.optString("presetLabel", ""),
+                        item.optString("fixtureId", ""),
+                        item.optString("presetNo", ""),
+                        photo,
+                        item.optString("description", "")
+                ));
+            }
+        } catch (Exception ignored) {
+        }
+        return result;
     }
 
     private void savePassportQuietly() {
@@ -2626,17 +3662,28 @@ public class MainActivity extends ComponentActivity {
 
     private File findPhoto(PresetItem item) {
         File exact = new File(photosDir, item.fileStem() + ".jpg");
-        return exact.exists() ? exact : null;
+        if (exact.exists()) return exact;
+        File legacy = new File(photosDir, safe(item.presetLabel + "_" + item.fixtureId) + ".jpg");
+        return legacy.exists() ? legacy : null;
     }
 
     private File findPhotoForRow(PassportRow row, int duplicateIndex) {
         String stem = row.fileStem();
-        File exact = new File(photosDir, stem + ".jpg");
+        String legacyStem = safe(row.presetLabel + "_" + row.fixtureId);
+        ArrayList<String> stems = new ArrayList<>();
+        stems.add(stem);
+        if (!legacyStem.equals(stem)) stems.add(legacyStem);
         if (duplicateIndex > 1) {
-            File numbered = new File(photosDir, stem + "_" + duplicateIndex + ".jpg");
-            if (numbered.exists()) return numbered;
+            for (String candidate : stems) {
+                File numbered = new File(photosDir, candidate + "_" + duplicateIndex + ".jpg");
+                if (numbered.exists()) return numbered;
+            }
         }
-        return exact.exists() ? exact : null;
+        for (String candidate : stems) {
+            File exact = new File(photosDir, candidate + ".jpg");
+            if (exact.exists()) return exact;
+        }
+        return null;
     }
 
     private File photoTargetForRow(PassportRow row) {
@@ -2668,6 +3715,12 @@ public class MainActivity extends ComponentActivity {
         return files != null && files.length > 0 ? files[0] : null;
     }
 
+    private File requireProjectXml(File dir) throws Exception {
+        File xml = findProjectXml(dir);
+        if (xml == null) throw new Exception("в папке проекта нет XML");
+        return xml;
+    }
+
     private String projectTitleFromDir(File dir) {
         String folderName = dir.getName();
         return folderName.endsWith("_passport") ? folderName.substring(0, folderName.length() - "_passport".length()) : folderName;
@@ -2690,6 +3743,20 @@ public class MainActivity extends ComponentActivity {
             }
         }
         file.delete();
+    }
+
+    private void copyRecursive(File source, File target) throws Exception {
+        if (source.isDirectory()) {
+            if (!target.exists() && !target.mkdirs()) throw new Exception("Не могу создать " + target.getAbsolutePath());
+            File[] children = source.listFiles();
+            if (children != null) {
+                for (File child : children) copyRecursive(child, new File(target, child.getName()));
+            }
+        } else {
+            File parent = target.getParentFile();
+            if (parent != null && !parent.exists()) parent.mkdirs();
+            copy(new FileInputStream(source), target);
+        }
     }
 
     private File uniquePhoto(String stem) {
@@ -2723,9 +3790,15 @@ public class MainActivity extends ComponentActivity {
 
     private void copy(InputStream in, File out) throws Exception {
         try (InputStream input = in; FileOutputStream output = new FileOutputStream(out)) {
+            copy(input, output);
+        }
+    }
+
+    private void copy(InputStream input, OutputStream output) throws Exception {
+        try (InputStream in = input; OutputStream out = output) {
             byte[] buf = new byte[8192];
             int n;
-            while ((n = input.read(buf)) > 0) output.write(buf, 0, n);
+            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
         }
     }
 

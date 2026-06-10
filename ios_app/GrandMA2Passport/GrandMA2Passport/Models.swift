@@ -3,9 +3,11 @@ import SwiftUI
 
 enum Screen {
     case start
+    case projectSource
     case presetSetup
     case partituraSetup
     case projectList(ProjectMode)
+    case projectMode(Project)
     case projectFiles(ProjectMode)
     case presetWorkspace
     case camera
@@ -74,6 +76,14 @@ struct Project: Identifiable, Hashable {
     var xml: URL
 }
 
+struct ReplacePrompt: Identifiable {
+    let id = UUID()
+    var title: String
+    var message: String
+    var confirmTitle: String
+    var action: () -> Void
+}
+
 enum Brand {
     static let black = Color.black
     static let panel = Color(red: 0.08, green: 0.08, blue: 0.08)
@@ -96,4 +106,3 @@ func safe(_ value: String) -> String {
 func displayTitle(_ value: String) -> String {
     value.replacingOccurrences(of: "_", with: " ")
 }
-

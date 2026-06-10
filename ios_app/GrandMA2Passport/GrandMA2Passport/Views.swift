@@ -28,6 +28,19 @@ struct RootView: View {
         } message: {
             Text(store.errorText ?? "")
         }
+        .alert(item: Binding(get: { store.replacePrompt }, set: { if $0 == nil { store.replacePrompt = nil } })) { prompt in
+            Alert(
+                title: Text(prompt.title),
+                message: Text(prompt.message),
+                primaryButton: .destructive(Text(prompt.confirmTitle)) {
+                    store.replacePrompt = nil
+                    prompt.action()
+                },
+                secondaryButton: .cancel(Text("Отмена")) {
+                    store.replacePrompt = nil
+                }
+            )
+        }
         .sheet(isPresented: $showXmlPicker) {
             DocumentPicker { url in
                 DebugLog.write("RootView xml picked callback \(url.path)")
@@ -106,28 +119,32 @@ struct RootView: View {
         switch store.screen {
         case .start:
             StartView(
-                presets: { store.screen = .presetSetup },
-                partitura: { store.screen = .partituraSetup }
+                projects: { store.openProjectSource() }
             )
+        case .projectSource:
+            ProjectSourceView(back: store.goBack)
         case .presetSetup:
             PresetSetupView(
                 cameraDevice: $cameraDevice,
                 loadXml: { xmlMode = .presets; showXmlPicker = true },
-                openProject: { store.reloadProjects(); store.lastProjectListMode = .presets; store.screen = .projectList(.presets) },
+                openProject: { store.openProjectList(.presets) },
                 back: store.goBack
             )
         case .partituraSetup:
             PartituraSetupView(
                 loadXml: { xmlMode = .partitura; showXmlPicker = true },
-                openProject: { store.reloadProjects(); store.lastProjectListMode = .partitura; store.screen = .projectList(.partitura) },
+                openProject: { store.openProjectList(.partitura) },
                 back: store.goBack
             )
         case .projectList(let mode):
-            ProjectListView(mode: mode, back: store.goBack)
+            ProjectListView(mode: mode, createProject: { xmlMode = .presets; showXmlPicker = true }, back: store.goBack)
+        case .projectMode(let project):
+            ProjectModeView(project: project, open: store.openProjectBuilder, files: store.openProjectFiles, back: store.goBack)
         case .projectFiles(let mode):
             ProjectFilesView(mode: mode, open: { previewURL = $0 }, share: { shareURL = $0 }, back: store.goBack)
         case .presetWorkspace:
             PresetWorkspaceView(
+                cameraDevice: $cameraDevice,
                 takePhoto: { store.screen = .camera; showCamera = true },
                 loadPhoto: { showLibrary = true },
                 back: {
@@ -140,7 +157,16 @@ struct RootView: View {
         case .camera:
             EmptyView().onAppear { showCamera = true }
         case .loading(let message):
-            VStack { Text(message).font(.title2.bold()).foregroundStyle(Brand.yellow) }
+            VStack(spacing: 14) {
+                Text(message).font(.title2.bold()).foregroundStyle(Brand.yellow)
+                if !store.remoteStatus.isEmpty {
+                    Text(store.remoteStatus)
+                        .font(.headline.bold())
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(Brand.silver)
+                        .padding(.horizontal, 18)
+                }
+            }
         }
     }
 }
@@ -151,8 +177,9 @@ private struct ShareURL: Identifiable {
 }
 
 struct StartView: View {
-    var presets: () -> Void
-    var partitura: () -> Void
+    @EnvironmentObject var store: AppStore
+    var projects: () -> Void
+    @State private var showSettings = false
 
     var body: some View {
         VStack(spacing: 22) {
@@ -162,11 +189,153 @@ struct StartView: View {
                 .scaledToFit()
                 .frame(maxHeight: 360)
                 .padding(.horizontal, 18)
-            AppButton("Пресеты", action: presets)
-            AppButton("Партитура", action: partitura)
+            AppButton("Проекты", action: projects)
+            AppButton(store.remoteConnected ? "Облако подключено" : "Настройки облака", service: !store.remoteConnected) { showSettings = true }
             Spacer()
         }
         .padding(24)
+        .sheet(isPresented: $showSettings) {
+            SftpSettingsView()
+                .environmentObject(store)
+        }
+    }
+}
+
+struct ProjectSourceView: View {
+    @EnvironmentObject var store: AppStore
+    var back: () -> Void
+
+    var body: some View {
+        VStack(spacing: 18) {
+            Text("Проекты")
+                .font(.largeTitle.bold())
+                .foregroundStyle(Brand.text)
+            Spacer()
+            AppButton("Устройство") { store.openLocalProjects() }
+                .frame(minWidth: 260)
+            AppButton("Облако") { store.openCloudProjects() }
+                .frame(minWidth: 260)
+            Text(store.remoteConnected ? "✓ облако подключено" : "облако подключится при открытии")
+                .font(.headline.bold())
+                .foregroundStyle(store.remoteConnected ? Color.green : Brand.muted)
+                .padding(.top, 10)
+            Spacer()
+            AppButton("Назад", service: true, action: back)
+        }
+        .padding(24)
+    }
+}
+
+struct StoragePanel: View {
+    @EnvironmentObject var store: AppStore
+    @Binding var showSettings: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Хранилище")
+                .font(.headline.bold())
+                .foregroundStyle(Brand.silver)
+            HStack(spacing: 12) {
+                storageButton("Локально", selected: !store.remoteSettings.remoteMode) {
+                    store.setRemoteMode(false)
+                }
+                storageButton("Облако", selected: store.remoteSettings.remoteMode) {
+                    store.setRemoteMode(true)
+                }
+            }
+            Text(store.remoteSettings.remoteMode ? (store.remoteConnected ? "✓ подключено" : "✕ нет подключения") : "Локально: MA2_passports")
+                .font(.headline.bold())
+                .foregroundStyle(store.remoteSettings.remoteMode ? (store.remoteConnected ? Color.green : Color.red) : Brand.silver)
+            if store.remoteSettings.remoteMode {
+                AppButton("Настройка подключения", service: true) {
+                    showSettings = true
+                }
+            }
+        }
+        .padding(14)
+        .background(Brand.panel)
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Brand.yellow, lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func storageButton(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.headline.bold())
+                .frame(maxWidth: .infinity)
+                .frame(minHeight: 48)
+        }
+        .foregroundStyle(selected ? Brand.yellow : Brand.silver)
+        .background(Brand.black)
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(selected ? Brand.yellow : Brand.silverDark, lineWidth: 2))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+struct SftpSettingsView: View {
+    @EnvironmentObject var store: AppStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var cloudURL = ""
+    @State private var port = "22"
+    @State private var username = ""
+    @State private var password = ""
+    @State private var remoteDir = RemoteSFTPService.rootName
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 14) {
+                remoteField("SFTP сервер", text: $cloudURL)
+                    .keyboardType(.URL)
+                remoteField("Порт", text: $port)
+                    .keyboardType(.numberPad)
+                remoteField("Пользователь", text: $username)
+                SecureField("Пароль", text: $password)
+                    .padding(12)
+                    .background(Brand.panel)
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Brand.yellow, lineWidth: 1))
+                remoteField("Папка", text: $remoteDir)
+                AppButton("Подключить и сохранить") {
+                    let parsedPort = Int(port.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 22
+                    let cleanDir = remoteDir.trimmingCharacters(in: .whitespacesAndNewlines)
+                    store.saveRemoteSettings(RemoteServerSettings(
+                        remoteMode: true,
+                        url: cloudURL.trimmingCharacters(in: .whitespacesAndNewlines),
+                        port: parsedPort,
+                        username: username.trimmingCharacters(in: .whitespacesAndNewlines),
+                        password: password,
+                        remoteDir: cleanDir.isEmpty ? RemoteSFTPService.rootName : cleanDir
+                    ))
+                    dismiss()
+                }
+                Spacer()
+            }
+            .padding(24)
+            .background(Brand.black.ignoresSafeArea())
+            .foregroundStyle(Brand.text)
+            .navigationTitle("Настройка облака")
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Назад") { dismiss() }
+                        .foregroundStyle(Brand.silver)
+                }
+            }
+            .onAppear {
+                cloudURL = store.remoteSettings.url
+                port = String(store.remoteSettings.port == 0 ? 22 : store.remoteSettings.port)
+                username = store.remoteSettings.username
+                password = store.remoteSettings.password
+                remoteDir = store.remoteSettings.remoteDir.isEmpty ? RemoteSFTPService.rootName : store.remoteSettings.remoteDir
+            }
+        }
+    }
+
+    private func remoteField(_ title: String, text: Binding<String>) -> some View {
+        TextField(title, text: text)
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            .padding(12)
+            .background(Brand.panel)
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Brand.yellow, lineWidth: 1))
     }
 }
 
@@ -204,8 +373,16 @@ struct PartituraSetupView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Партитура").font(.largeTitle)
-            AppButton("Загрузить XML", action: loadXml)
-            AppButton(store.selectedPartituraProject.map { "Проект: \(displayTitle($0.title))" } ?? "Открыть проект", action: openProject)
+            if store.projectModeProject?.dir != store.selectedPartituraProject?.dir {
+                AppButton("Загрузить XML", action: loadXml)
+                AppButton(store.selectedPartituraProject.map { "Проект: \(displayTitle($0.title))" } ?? "Открыть проект", action: openProject)
+            } else if let project = store.selectedPartituraProject {
+                Text("Проект: \(displayTitle(project.title))")
+                    .font(.title3.bold())
+                    .foregroundStyle(Brand.silver)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 8)
+            }
             Text("Включи нужные поля.").foregroundStyle(Brand.text).padding(.top, 8)
             ScrollView {
                 VStack(spacing: 10) {
@@ -238,37 +415,50 @@ struct PartituraSetupView: View {
 struct ProjectListView: View {
     @EnvironmentObject var store: AppStore
     var mode: ProjectMode
+    var createProject: () -> Void
     var back: () -> Void
     @State private var renameProject: Project?
     @State private var renameTitle = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Проекты").font(.largeTitle)
+            Text(store.remoteSettings.remoteMode ? "Проекты: облако" : "Проекты: устройство")
+                .font(.largeTitle.bold())
+            if !store.remoteSettings.remoteMode {
+                AppButton("Создать новый проект", action: createProject)
+            }
             ScrollView {
                 VStack(spacing: 14) {
                     ForEach(store.projects) { project in
                         ProjectCard(project: project)
                             .onTapGesture {
-                                if mode == .partitura {
-                                    store.selectedPartituraProject = project
-                                    store.screen = .partituraSetup
-                                } else {
-                                    store.openPresetProject(project)
-                                }
+                                store.openProjectMode(project)
                             }
                             .contextMenu {
-                                Button("Файлы") {
-                                    if mode == .partitura { store.selectedPartituraProject = project }
-                                    store.filesProjectDir = project.dir
-                                    store.lastFilesMode = mode
-                                    store.screen = .projectFiles(mode)
+                                if !store.remoteSettings.remoteMode {
+                                    Button("Открыть") {
+                                        store.openProjectMode(project)
+                                    }
                                 }
                                 Button("Переименовать") {
                                     renameProject = project
                                     renameTitle = displayTitle(project.title)
                                 }
+                                if store.remoteSettings.remoteMode {
+                                    Button("Загрузить на устройство") {
+                                        store.requestSaveProjectToLocal(project)
+                                    }
+                                } else {
+                                    Button("Загрузить в облако") {
+                                        store.requestSaveProjectToRemote(project)
+                                    }
+                                }
                                 Button("Удалить", role: .destructive) {
+                                    if store.remoteSettings.remoteMode {
+                                        Task {
+                                            try? await RemoteSFTPService.deleteProject(project.dir.lastPathComponent, settings: store.remoteSettings, remoteRoot: store.remoteRootPath)
+                                        }
+                                    }
                                     try? FileManager.default.removeItem(at: project.dir)
                                     store.reloadProjects()
                                 }
@@ -289,6 +479,68 @@ struct ProjectListView: View {
                 renameProject = nil
             }
             Button("Отмена", role: .cancel) { renameProject = nil }
+        }
+    }
+}
+
+struct ProjectModeView: View {
+    @EnvironmentObject var store: AppStore
+    var project: Project
+    var open: (Project, ProjectMode) -> Void
+    var files: (Project, ProjectMode) -> Void
+    var back: () -> Void
+
+    var body: some View {
+        VStack(spacing: 18) {
+            Text(displayTitle(project.title))
+                .font(.largeTitle.bold())
+                .multilineTextAlignment(.center)
+            Spacer()
+            projectBlock(title: "Пресеты", mode: .presets)
+            projectBlock(title: "Партитура", mode: .partitura)
+            Spacer()
+            AppButton("Назад", service: true, action: back)
+        }
+        .padding(24)
+    }
+
+    private func projectBlock(title: String, mode: ProjectMode) -> some View {
+        Button {
+            if store.projectModeCloud {
+                files(project, mode)
+            } else {
+                open(project, mode)
+            }
+        } label: {
+            Text(title)
+                .font(.title2.bold())
+                .frame(maxWidth: .infinity)
+                .frame(height: 84)
+        }
+        .foregroundStyle(Brand.yellow)
+        .background(Brand.black)
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Brand.yellow, lineWidth: 2))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .contextMenu {
+            if !store.projectModeCloud {
+                Button("Открыть") {
+                    open(project, mode)
+                }
+            }
+            if !store.projectModeCloud {
+                Button("Файлы") {
+                    files(project, mode)
+                }
+            }
+            if store.projectModeCloud {
+                Button("Загрузить на устройство") {
+                    store.requestSaveProjectToLocal(project)
+                }
+            } else {
+                Button("Загрузить в облако") {
+                    store.requestSaveProjectToRemote(project)
+                }
+            }
         }
     }
 }
@@ -331,6 +583,7 @@ struct ProjectFilesView: View {
 
 struct PresetWorkspaceView: View {
     @EnvironmentObject var store: AppStore
+    @Binding var cameraDevice: UIImagePickerController.CameraDevice
     var takePhoto: () -> Void
     var loadPhoto: () -> Void
     var back: () -> Void
@@ -370,6 +623,7 @@ struct PresetWorkspaceView: View {
                 descriptionEditor
                 Text("Строк: \(store.rows.count)")
                     .frame(maxWidth: .infinity, alignment: .leading)
+                cameraPicker
                 rowsList
                 actionRow(row)
             }
@@ -392,6 +646,7 @@ struct PresetWorkspaceView: View {
                         Text("Строк: \(store.rows.count)")
                         Spacer()
                     }
+                    cameraPicker
                     descriptionEditor.frame(height: 96)
                     rowsList
                 }
@@ -474,6 +729,15 @@ struct PresetWorkspaceView: View {
             }
         }
         .scrollContentBackground(.hidden)
+    }
+
+    private var cameraPicker: some View {
+        Picker("", selection: $cameraDevice) {
+            Text("Задняя камера").tag(UIImagePickerController.CameraDevice.rear)
+            Text("Передняя камера").tag(UIImagePickerController.CameraDevice.front)
+        }
+        .pickerStyle(.segmented)
+        .tint(Brand.silver)
     }
 
     @ViewBuilder

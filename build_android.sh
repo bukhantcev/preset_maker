@@ -3,7 +3,11 @@ set -euo pipefail
 
 cd "$(dirname "$0")/android_app"
 
-export JAVA_HOME="/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home"
+if [ -d "/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home" ]; then
+  export JAVA_HOME="/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home"
+elif [ -d "/Applications/PyCharm CE.app/Contents/jbr/Contents/Home" ]; then
+  export JAVA_HOME="/Applications/PyCharm CE.app/Contents/jbr/Contents/Home"
+fi
 ./gradlew assembleDebug
 
 cd ..

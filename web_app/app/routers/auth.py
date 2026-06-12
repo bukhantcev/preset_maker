@@ -28,7 +28,10 @@ oauth.register(
     access_token_url='https://oauth.yandex.ru/token',
     authorize_url='https://oauth.yandex.ru/authorize',
     api_base_url='https://login.yandex.ru/',
-    client_kwargs={'scope': 'login:email login:info'}
+    client_kwargs={
+        'scope': 'login:email login:info',
+        'token_endpoint_auth_method': 'client_secret_post',
+    },
 )
 
 def verify_password(plain_password, hashed_password):

@@ -155,7 +155,12 @@ async def yandex_disk_connect(request: Request):
     redirect_uri = request.url_for('auth_yandex_disk_callback')
     redirect_uri = str(redirect_uri).replace('http://', 'https://')
     print(f"YANDEX_DISK_REDIRECT_URI={redirect_uri}", flush=True)
-    return await oauth.yandex.authorize_redirect(request, redirect_uri)
+    return await oauth.yandex.authorize_redirect(
+        request,
+        redirect_uri,
+        scope='cloud_api:disk.app_folder cloud_api:disk.info',
+        force_confirm='yes',
+    )
 
 @router.get("/yandex/disk_callback")
 async def auth_yandex_disk_callback(request: Request, db: Session = Depends(database.get_db)):

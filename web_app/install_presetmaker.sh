@@ -134,6 +134,8 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      - PYTHONUNBUFFERED=1
     ports:
       - "127.0.0.1:${HTTP_PORT}:8000"
     volumes:
@@ -297,11 +299,21 @@ main() {
   write_nginx_http "${domain}"
   issue_certificate "${domain}" "${le_email}"
 
+  echo "Проверяю приложение..."
+  (cd "${app_dir}" && run_as_root ${compose_cmd} ps)
+  if ! curl -fsS "https://${domain}/" >/dev/null; then
+    echo "Сайт поднят, но HTTPS-проверка не прошла. Проверь DNS домена и логи: cd ${app_dir} && ${compose_cmd} logs -f" >&2
+  fi
+
   echo
   echo "Готово."
   echo "Сайт: https://${domain}"
   echo "Папка: ${app_dir}"
   echo "Админ: ${admin_email}"
+  echo
+  echo "Yandex OAuth redirect URI, которые нужно добавить в приложение Yandex:"
+  echo "  https://${domain}/auth/yandex/callback"
+  echo "  https://${domain}/auth/yandex/disk_callback"
   echo
   echo "Полезные команды:"
   echo "  cd ${app_dir} && ${compose_cmd} logs -f"

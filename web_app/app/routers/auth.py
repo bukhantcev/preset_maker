@@ -37,6 +37,7 @@ def get_password_hash(password):
 
 @router.post("/register")
 async def register(request: Request, email: str = Form(...), password: str = Form(...), db: Session = Depends(database.get_db)):
+    email = email.strip().lower()
     db_user = db.query(models.User).filter(models.User.email == email).first()
     if db_user:
         raise HTTPException(status_code=400, detail="Email already registered")
@@ -52,6 +53,7 @@ async def register(request: Request, email: str = Form(...), password: str = For
 
 @router.post("/login")
 async def login(request: Request, email: str = Form(...), password: str = Form(...), db: Session = Depends(database.get_db)):
+    email = email.strip().lower()
     db_user = db.query(models.User).filter(models.User.email == email).first()
     if not db_user or not verify_password(password, db_user.hashed_password):
         raise HTTPException(status_code=400, detail="Incorrect email or password")
@@ -87,6 +89,7 @@ async def auth_yandex_callback(request: Request, db: Session = Depends(database.
     
     if not email:
         return RedirectResponse(url="/?error=Не%20удалось%20получить%20email%20от%20Yandex", status_code=303)
+    email = email.strip().lower()
         
     db_user = db.query(models.User).filter((models.User.yandex_id == yandex_id) | (models.User.email == email)).first()
     

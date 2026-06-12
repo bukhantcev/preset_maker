@@ -136,6 +136,14 @@
         gap: 12px;
         overflow-wrap: anywhere;
     }
+    .preset-card-main strong:first-child {
+        min-width: 0;
+        flex: 1;
+    }
+    .preset-card-fixture {
+        flex: 0 0 auto;
+        text-align: right;
+    }
     .photo-mark { color: var(--green); font-weight: 900; }
     .selected .photo-mark { color: #000; }
     .progress-line {
@@ -293,6 +301,22 @@
             gap: 8px;
             line-height: 1.2;
         }
+        .preset-card-meta {
+            font-size: 12px;
+            color: var(--muted);
+        }
+        .selected .preset-card-meta { color: #262626; }
+        .preset-card-main {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            align-items: start;
+            gap: 8px;
+            font-size: 14px;
+        }
+        .preset-card-fixture {
+            padding-left: 8px;
+            white-space: nowrap;
+        }
         .preset-card .muted {
             font-size: 12px;
             line-height: 1.2;
@@ -391,7 +415,7 @@
     const deletePhotoBtn = document.getElementById('delete-photo-btn');
 
     function isMobileCapture() {
-        return window.matchMedia('(max-width: 850px)').matches;
+        return window.matchMedia('(max-width: 850px), (max-width: 1024px) and (orientation: landscape), (pointer: coarse)').matches;
     }
 
     async function initCamera() {
@@ -565,8 +589,8 @@
             card.className = 'preset-card' + (selected ? ' selected' : '');
             card.onclick = () => selectRow(index);
             card.innerHTML = `
-                <div class="line"><span>${index + 1}/${projectData.rows.length}</span><span class="photo-mark">${mark}</span></div>
-                <div class="line"><strong>${row.preset_label}</strong><strong>${row.fixture_id}</strong></div>
+                <div class="line preset-card-meta"><span>${index + 1}/${projectData.rows.length}</span><span class="photo-mark">${mark}</span></div>
+                <div class="line preset-card-main"><strong>${row.preset_label}</strong><strong class="preset-card-fixture">${row.fixture_id}</strong></div>
                 <div class="muted">${row.description || '&nbsp;'}</div>
             `;
             cardList.appendChild(card);

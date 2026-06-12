@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="header">
+    <h1>Панель администратора</h1>
+    <a href="/" class="btn-silver">Вернуться на главную</a>
+</div>
+
+<div class="panel">
+    <h2>Пользователи системы</h2>
+    <div style="overflow-x: auto;">
+        <table style="width: 100%; border-collapse: collapse; background-color: #141414;">
+            <thead>
+                <tr>
+                    <th style="border: 1px solid #333; padding: 10px; background-color: #000; color: #ffb800; text-align: left;">ID</th>
+                    <th style="border: 1px solid #333; padding: 10px; background-color: #000; color: #ffb800; text-align: left;">Email</th>
+                    <th style="border: 1px solid #333; padding: 10px; background-color: #000; color: #ffb800; text-align: left;">Роль</th>
+                    <th style="border: 1px solid #333; padding: 10px; background-color: #000; color: #ffb800; text-align: left;">Хранилище</th>
+                    <th style="border: 1px solid #333; padding: 10px; background-color: #000; color: #ffb800; text-align: center;">Проекты</th>
+                    <th style="border: 1px solid #333; padding: 10px; background-color: #000; color: #ffb800; text-align: left;">Размер на сервере</th>
+                    <th style="border: 1px solid #333; padding: 10px; background-color: #000; color: #ffb800; text-align: left;">Регистрация</th>
+                    <th style="border: 1px solid #333; padding: 10px; background-color: #000; color: #ffb800; text-align: center;">Действия</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for u in users %}
+                <tr style="background-color: #0a0a0a;">
+                    <td style="border: 1px solid #333; padding: 10px;">{{ u.id }}</td>
+                    <td style="border: 1px solid #333; padding: 10px; font-weight: bold;">{{ u.email }}</td>
+                    <td style="border: 1px solid #333; padding: 10px; color: {% if u.is_admin %}#ff4545{% else %}#9c9c9c{% endif %}; font-weight: {% if u.is_admin %}bold{% else %}normal{% endif %};">
+                        {% if u.is_admin %}Администратор{% else %}Пользователь{% endif %}
+                    </td>
+                    <td style="border: 1px solid #333; padding: 10px;">
+                        {% if u.storage_mode == 'temp' %}
+                            <span style="color: #9c9c9c;">Временное (сервер)</span>
+                        {% elif u.storage_mode == 'sftp' %}
+                            <span style="color: #4ee06d;">Свой SFTP</span>
+                        {% else %}
+                            {{ u.storage_mode }}
+                        {% endif %}
+                    </td>
+                    <td style="border: 1px solid #333; padding: 10px; text-align: center; color: #ffb800; font-weight: bold;">{{ u.project_count }}</td>
+                    <td style="border: 1px solid #333; padding: 10px;">{{ u.size_mb }} МБ</td>
+                    <td style="border: 1px solid #333; padding: 10px; color: #9c9c9c; font-size: 13px;">{{ u.created_at.strftime('%Y-%m-%d %H:%M') if u.created_at else 'N/A' }}</td>
+                    <td style="border: 1px solid #333; padding: 10px; text-align: center; display: flex; gap: 5px; justify-content: center;">
+                        <form action="/admin/user/{{ u.id }}/clear_projects" method="post" onsubmit="return confirm('Удалить ВСЕ проекты пользователя {{ u.email }}? Это освободит место на сервере.');">
+                            <button type="submit" class="btn-silver" style="padding: 4px 8px; font-size: 11px;">Очистить проекты</button>
+                        </form>
+                        <form action="/admin/user/{{ u.id }}/reset_password" method="post" onsubmit="return confirm('Сбросить пароль для {{ u.email }} на временный?');">
+                            <button type="submit" class="btn-yellow" style="padding: 4px 8px; font-size: 11px; color: #000;">Сбросить пароль</button>
+                        </form>
+                        {% if not u.is_admin or u.id != admin_user.id %}
+                        <form action="/admin/user/{{ u.id }}/delete" method="post" onsubmit="return confirm('Удалить пользователя {{ u.email }} и все его данные безвозвратно?');">
+                            <button type="submit" class="btn-danger" style="padding: 4px 8px; font-size: 11px;">Удалить</button>
+                        </form>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="auth-wrap">
+    <h1>Passport Creator</h1>
+
+    <div class="notice">
+        <strong>Внимание</strong>
+        <span>Проекты на сервере хранятся 12 часов. Чтобы сохранить проекты надолго, используйте облачные хранилища.</span>
+    </div>
+
+    <div class="auth-grid">
+        <form action="/auth/login" method="post" class="panel auth-panel">
+            <h2>Вход</h2>
+            <input type="text" name="email" placeholder="Email" required>
+            <input type="password" name="password" placeholder="Пароль" required>
+            <button type="submit" class="btn-yellow">Войти</button>
+            <a href="/auth/yandex" class="btn-silver auth-yandex">Войти через Яндекс</a>
+        </form>
+
+        <form action="/auth/register" method="post" class="panel auth-panel">
+            <h2>Регистрация</h2>
+            <input type="text" name="email" placeholder="Email" required>
+            <input type="password" name="password" placeholder="Пароль" required>
+            <button type="submit" class="btn-silver">Создать</button>
+            <a href="/auth/yandex" class="btn-yellow auth-yandex">Регистрация через Яндекс</a>
+        </form>
+    </div>
+</div>
+
+<style>
+    .auth-wrap {
+        min-height: calc(100vh - 32px);
+        max-width: 760px;
+        margin: 0 auto;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 14px;
+    }
+    .auth-wrap h1 {
+        text-align: center;
+        font-size: clamp(26px, 7vw, 44px);
+    }
+    .notice {
+        border: 1px solid var(--yellow);
+        color: var(--silver);
+        border-radius: var(--radius);
+        padding: 12px 14px;
+        display: grid;
+        gap: 5px;
+        background: #080808;
+        text-align: center;
+    }
+    .notice strong { color: var(--yellow); }
+    .auth-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 14px;
+    }
+    .auth-panel {
+        margin: 0;
+        display: grid;
+        gap: 10px;
+    }
+    .auth-panel h2 { font-size: 22px; }
+    .auth-yandex {
+        min-height: 44px;
+        padding: 10px 14px;
+        font-size: 15px;
+    }
+    @media (max-width: 680px) {
+        .auth-wrap {
+            justify-content: flex-start;
+            padding-top: 8px;
+            gap: 10px;
+        }
+        .auth-grid {
+            grid-template-columns: 1fr;
+            gap: 10px;
+        }
+        .auth-panel { padding: 14px; }
+        .auth-panel h2 { font-size: 20px; }
+        .notice { font-size: 14px; padding: 10px; }
+    }
+</style>
+{% endblock %}

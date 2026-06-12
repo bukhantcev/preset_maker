@@ -1,0 +1,221 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="header">
+    <h1>Настройки облака</h1>
+    <a href="/" class="btn-silver">Назад</a>
+</div>
+
+{% if request.query_params.get("msg") %}
+<div class="status-card ok">{{ request.query_params.get("msg") }}</div>
+{% endif %}
+
+{% if request.query_params.get("error") %}
+<div class="status-card bad">{{ request.query_params.get("error") }}</div>
+{% endif %}
+
+<section class="settings-shell">
+    <div class="storage-grid">
+        <form action="/settings/storage" method="post">
+            <input type="hidden" name="storage_mode" value="temp">
+            <button type="submit" class="storage-card {% if user.storage_mode == 'temp' %}selected{% endif %}">
+                <strong>Без облака</strong>
+                <span>Только временно на сервере</span>
+            </button>
+        </form>
+
+        <form action="/settings/storage" method="post">
+            <input type="hidden" name="storage_mode" value="sftp">
+            <button type="submit" class="storage-card {% if user.storage_mode == 'sftp' %}selected{% endif %}">
+                <strong>SFTP</strong>
+                <span>Свой сервер</span>
+            </button>
+        </form>
+
+        <form action="/settings/storage" method="post">
+            <input type="hidden" name="storage_mode" value="yandex_disk">
+            <button type="submit" class="storage-card {% if user.storage_mode == 'yandex_disk' %}selected{% endif %}">
+                <strong>Яндекс.Диск</strong>
+                <span>Облачная папка приложения</span>
+            </button>
+        </form>
+    </div>
+
+    <div class="connection-card {% if cloud_ok %}connected{% else %}disconnected{% endif %}">
+        <div class="connection-mark">{% if cloud_ok %}✓{% else %}×{% endif %}</div>
+        <div>
+            <strong>{% if cloud_ok %}Облако подключено{% else %}Облако не подключено{% endif %}</strong>
+            <span>{{ cloud_message }}</span>
+        </div>
+    </div>
+
+    {% if user.storage_mode == 'sftp' %}
+    <details class="settings-drawer" {% if not cloud_ok %}open{% endif %}>
+        <summary>Настройки SFTP</summary>
+        <form action="/settings/sftp" method="post" class="settings-form">
+            <label>Хост</label>
+            <input type="text" name="host" value="{{ sftp.host }}" placeholder="my-server.ru" required>
+
+            <label>Порт</label>
+            <input type="text" name="port" value="{{ sftp.port or 22 }}" placeholder="22">
+
+            <label>Пользователь</label>
+            <input type="text" name="username" value="{{ sftp.username }}" placeholder="root" required>
+
+            <label>Пароль</label>
+            <input type="password" name="password" value="{{ sftp.password }}" placeholder="Пароль">
+
+            <label>Папка проектов</label>
+            <input type="text" name="remote_dir" value="{{ sftp.remote_dir or 'MA2_passports' }}" placeholder="MA2_passports">
+
+            <button type="submit" class="btn-yellow">Подключить и сохранить</button>
+        </form>
+    </details>
+    {% elif user.storage_mode == 'yandex_disk' %}
+    <div class="provider-actions">
+        <a href="/auth/yandex/disk_connect" class="btn-yellow">
+            {% if user.yandex_manual_token or user.yandex_disk_token %}Переподключить{% else %}Подключить{% endif %}
+        </a>
+    </div>
+    {% endif %}
+</section>
+
+<style>
+    .settings-shell {
+        display: grid;
+        gap: 16px;
+    }
+    .storage-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 12px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: #080808;
+        padding: 12px;
+    }
+    .storage-grid form { margin: 0; }
+    .storage-card {
+        width: 100%;
+        min-height: 112px;
+        border: 2px solid var(--silver);
+        border-radius: var(--radius);
+        background: #000;
+        color: var(--silver);
+        padding: 16px;
+        cursor: pointer;
+        display: grid;
+        gap: 8px;
+        align-content: center;
+        text-align: left;
+    }
+    .storage-card strong {
+        font-size: 22px;
+        color: inherit;
+    }
+    .storage-card span {
+        color: var(--muted);
+        font-weight: 700;
+    }
+    .storage-card.selected {
+        border-color: var(--yellow);
+        color: var(--yellow);
+        background: #100d00;
+    }
+    .connection-card,
+    .status-card {
+        border-radius: var(--radius);
+        border: 1px solid var(--line);
+        background: var(--panel);
+        padding: 16px;
+    }
+    .connection-card {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 14px;
+        align-items: center;
+    }
+    .connection-card strong {
+        display: block;
+        font-size: 20px;
+        margin-bottom: 4px;
+    }
+    .connection-card span {
+        color: var(--muted);
+        overflow-wrap: anywhere;
+    }
+    .connection-mark {
+        width: 44px;
+        height: 44px;
+        border-radius: 999px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 28px;
+        font-weight: 900;
+        border: 2px solid currentColor;
+    }
+    .connected {
+        border-color: var(--green);
+        color: var(--green);
+    }
+    .disconnected,
+    .bad {
+        border-color: var(--red);
+        color: var(--red);
+    }
+    .ok {
+        border-color: var(--green);
+        color: var(--green);
+        text-align: center;
+    }
+    .settings-drawer {
+        border: 1px solid var(--yellow);
+        border-radius: var(--radius);
+        background: #080808;
+        overflow: hidden;
+    }
+    .settings-drawer summary {
+        min-height: 56px;
+        padding: 14px 18px;
+        color: var(--yellow);
+        font-size: 18px;
+        font-weight: 900;
+        cursor: pointer;
+        list-style: none;
+    }
+    .settings-drawer summary::-webkit-details-marker { display: none; }
+    .settings-drawer summary::after {
+        content: "+";
+        float: right;
+        font-size: 24px;
+    }
+    .settings-drawer[open] summary {
+        border-bottom: 1px solid var(--line);
+    }
+    .settings-drawer[open] summary::after { content: "−"; }
+    .settings-form {
+        display: grid;
+        gap: 10px;
+        padding: 16px;
+    }
+    .settings-form label {
+        color: var(--yellow);
+        font-weight: 900;
+    }
+    .provider-actions {
+        display: grid;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: #080808;
+        padding: 12px;
+    }
+    @media (max-width: 760px) {
+        .storage-grid {
+            grid-template-columns: 1fr;
+        }
+        .storage-card {
+            min-height: 86px;
+        }
+    }
+</style>
+{% endblock %}

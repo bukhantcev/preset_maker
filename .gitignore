@@ -10,6 +10,24 @@ __pycache__/
 .venv/
 .venv_x86/
 
+# Nested repo backups / copied server state
+.web_app_git_backup_*/
+web_app_backup_*/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+.env
+.env.*
+!.env.example
+logs/
+tmp/
+temp/
+.sync_metadata.json
+server_project_meta.json
+
 # PyInstaller / desktop builds
 build/
 dist/
@@ -33,4 +51,3 @@ release_preset_maker/*.zip
 release_preset_maker/*.app/
 release_preset_maker/ios_archive/
 release_preset_maker/ios_export/
-

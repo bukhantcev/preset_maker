@@ -1,0 +1,170 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="header">
+    <h1>Настройка таблицы</h1>
+    <div class="header-actions">
+        <button type="button" onclick="saveFields()" class="btn-silver">Назад</button>
+    </div>
+</div>
+
+<div class="panel fields-panel">
+    <div id="fields-list" class="fields-list">
+        {% for field in fields %}
+        <div class="field-item {% if field.enabled %}active{% endif %}" draggable="true" data-id="{{ field.field_id }}" data-title="{{ field.title }}">
+            <label class="field-toggle">
+                <input type="checkbox" id="check-{{ field.field_id }}" {% if field.enabled %}checked{% endif %} onchange="syncActive(this)">
+                <span>{{ field.title }}</span>
+            </label>
+            <div class="field-buttons">
+                <button type="button" class="btn-silver move-btn" onclick="moveField(this, -1)" title="Вверх" aria-label="Вверх">↑</button>
+                <button type="button" class="btn-silver move-btn" onclick="moveField(this, 1)" title="Вниз" aria-label="Вниз">↓</button>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+
+    <form id="fields-form" action="/projects/{{ project_name }}/partitura_fields_save" method="post">
+        <input type="hidden" name="fields_json" id="fields_json">
+    </form>
+</div>
+
+<style>
+    .fields-panel {
+        padding: 14px;
+        max-height: calc(100vh - 128px);
+        display: grid;
+        gap: 12px;
+        overflow: hidden;
+    }
+    .fields-list {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(260px, 1fr));
+        gap: 8px;
+        min-height: 0;
+        overflow: auto;
+        padding-right: 2px;
+    }
+    .field-item {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 8px;
+        align-items: center;
+        padding: 8px 10px;
+        border-radius: 6px;
+        border: 1px solid var(--silver);
+        background: #080808;
+        color: var(--silver);
+        cursor: grab;
+        min-height: 44px;
+    }
+    .field-item.active {
+        border-color: var(--yellow);
+        color: var(--yellow);
+    }
+    .field-item.dragging {
+        opacity: 0.55;
+        background: var(--panel-2);
+    }
+    .field-toggle {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        font-size: 16px;
+        font-weight: 900;
+        min-height: 28px;
+        min-width: 0;
+    }
+    .field-toggle span {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .field-toggle input {
+        width: 18px;
+        height: 18px;
+        accent-color: var(--yellow);
+        flex: 0 0 auto;
+    }
+    .field-buttons {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 6px;
+    }
+    .move-btn {
+        width: 36px;
+        min-height: 32px;
+        padding: 0;
+        font-size: 17px;
+        line-height: 1;
+    }
+    @media (max-width: 768px) {
+        .fields-panel {
+            max-height: none;
+            overflow: visible;
+            padding: 10px;
+        }
+        .fields-list {
+            grid-template-columns: 1fr;
+            overflow: visible;
+        }
+        .field-toggle { font-size: 15px; }
+    }
+</style>
+
+<script>
+    const fieldsList = document.getElementById('fields-list');
+    let draggedItem = null;
+
+    function syncActive(input) {
+        input.closest('.field-item').classList.toggle('active', input.checked);
+    }
+
+    function moveField(button, delta) {
+        const item = button.closest('.field-item');
+        const sibling = delta < 0 ? item.previousElementSibling : item.nextElementSibling;
+        if (!sibling) return;
+        if (delta < 0) fieldsList.insertBefore(item, sibling);
+        else fieldsList.insertBefore(sibling, item);
+    }
+
+    fieldsList.addEventListener('dragstart', (e) => {
+        draggedItem = e.target.closest('.field-item');
+        if (!draggedItem) return;
+        draggedItem.classList.add('dragging');
+    });
+
+    fieldsList.addEventListener('dragend', () => {
+        if (draggedItem) draggedItem.classList.remove('dragging');
+        draggedItem = null;
+    });
+
+    fieldsList.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        if (!draggedItem) return;
+        const afterElement = getDragAfterElement(fieldsList, e.clientY);
+        if (!afterElement) fieldsList.appendChild(draggedItem);
+        else fieldsList.insertBefore(draggedItem, afterElement);
+    });
+
+    function getDragAfterElement(container, y) {
+        const draggableElements = [...container.querySelectorAll('.field-item:not(.dragging)')];
+        return draggableElements.reduce((closest, child) => {
+            const box = child.getBoundingClientRect();
+            const offset = y - box.top - box.height / 2;
+            if (offset < 0 && offset > closest.offset) return { offset, element: child };
+            return closest;
+        }, { offset: Number.NEGATIVE_INFINITY }).element;
+    }
+
+    function saveFields() {
+        const items = [...fieldsList.querySelectorAll('.field-item')];
+        const config = items.map(item => ({
+            field_id: item.dataset.id,
+            title: item.dataset.title,
+            enabled: item.querySelector('input').checked
+        }));
+        document.getElementById('fields_json').value = JSON.stringify(config);
+        document.getElementById('fields-form').submit();
+    }
+</script>
+{% endblock %}

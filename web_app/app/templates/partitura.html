@@ -1,0 +1,439 @@
+{% extends "base.html" %}
+
+{% block head %}
+<style>
+    .workspace {
+        display: grid;
+        grid-template-columns: minmax(340px, 0.9fr) minmax(460px, 1.4fr);
+        gap: 18px;
+        height: calc(100vh - 122px);
+        overflow: hidden;
+    }
+    .editor-panel,
+    .list-panel {
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+    }
+    .editor-scroll {
+        min-height: 0;
+        overflow: auto;
+        display: grid;
+        gap: 12px;
+        padding-right: 4px;
+    }
+    .editor-field {
+        display: grid;
+        gap: 6px;
+    }
+    .editor-field label {
+        color: var(--yellow);
+        font-weight: 900;
+        font-size: 15px;
+    }
+    .editor-field textarea { min-height: 92px; }
+    .controls {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 12px;
+    }
+    .icon-control {
+        font-size: 28px;
+        line-height: 1;
+        min-height: 54px;
+        padding: 10px;
+    }
+    .translate-active {
+        color: #fff !important;
+    }
+    .partitura-title-row {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+    }
+    .settings-gear {
+        width: 48px;
+        min-height: 48px;
+        padding: 0;
+        font-size: 24px;
+        flex: 0 0 auto;
+    }
+    .partitura-nav {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(132px, 1fr));
+        gap: 12px;
+        align-items: center;
+    }
+    .table-wrap {
+        min-height: 0;
+        overflow: auto;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--panel);
+    }
+    table {
+        width: 100%;
+        border-collapse: collapse;
+        background: var(--panel);
+    }
+    th, td {
+        border-bottom: 1px solid var(--line);
+        padding: 10px;
+        text-align: left;
+        font-size: 14px;
+        vertical-align: top;
+    }
+    th {
+        background: #050505;
+        color: var(--yellow);
+        position: sticky;
+        top: 0;
+        z-index: 10;
+    }
+    tr { cursor: pointer; }
+    tr.selected {
+        background: var(--yellow);
+        color: #000;
+        font-weight: 900;
+    }
+    tr:hover:not(.selected) { background: var(--panel-2); }
+    .partitura-card-list {
+        display: none;
+        gap: 10px;
+        min-height: 0;
+        overflow: auto;
+    }
+    .cue-card {
+        background: var(--panel);
+        color: #fff;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        padding: 14px;
+        text-align: left;
+        display: grid;
+        gap: 8px;
+    }
+    .cue-card.selected {
+        background: var(--yellow);
+        color: #000;
+        border-color: var(--yellow);
+        font-weight: 900;
+    }
+    .cue-card strong { font-size: 18px; }
+    #no-data-msg {
+        text-align: center;
+        padding: 40px;
+        color: var(--muted);
+    }
+    @media (max-width: 850px) {
+        .header {
+            align-items: stretch;
+        }
+        .partitura-title-row {
+            justify-content: space-between;
+        }
+        .partitura-nav {
+            grid-template-columns: 1fr 1fr;
+            width: 100%;
+        }
+        .workspace {
+            grid-template-columns: 1fr;
+            height: auto;
+            overflow: visible;
+        }
+        .table-wrap { display: none; }
+        .partitura-card-list {
+            display: grid;
+            max-height: 52vh;
+        }
+        .editor-scroll { overflow: visible; }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="header">
+    <div>
+        <div class="partitura-title-row">
+            <h1>Партитура</h1>
+            <a href="/projects/{{ project_name }}/partitura_builder" class="btn-silver settings-gear" title="Настройка таблицы" aria-label="Настройка таблицы">⚙</a>
+        </div>
+        <div class="muted" style="margin-top: 6px; font-weight: 800;">{{ project.title }}</div>
+    </div>
+    <div class="header-actions partitura-nav">
+        <button type="button" onclick="leaveEditor('/')" class="btn-silver">Назад</button>
+        <button type="button" onclick="leaveEditor('/projects/{{ project_name }}/presets')" class="btn-silver">Пресеты</button>
+    </div>
+</div>
+
+<div class="workspace">
+    <div class="editor-panel">
+        <h2 id="cue-number-title">Кью</h2>
+        <div id="editor-fields-container" class="editor-scroll"></div>
+        <div class="controls">
+            <button type="button" class="btn-yellow icon-control" onclick="addRow()" title="Добавить" aria-label="Добавить">+</button>
+            <button type="button" id="translate-toggle" class="btn-yellow icon-control" onclick="toggleTranslation()" title="Перевести" aria-label="Перевести">🪄</button>
+            <button type="button" id="save-show-toggle" class="btn-yellow icon-control" onclick="saveShowXml()" title="Сохранить в шоу-файл" aria-label="Сохранить в шоу-файл">💾</button>
+            <button type="button" class="btn-danger icon-control" onclick="deleteRow()" title="Удалить" aria-label="Удалить">×</button>
+        </div>
+    </div>
+
+    <div class="list-panel">
+        <div class="progress-line muted" style="font-weight: 800;">
+            <span id="partitura-count">Строк: 0</span>
+        </div>
+        <div class="table-wrap">
+            <table id="partitura-table">
+                <thead>
+                    <tr>
+                        {% for field in fields %}
+                        <th>{{ field.title }}</th>
+                        {% endfor %}
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
+        <div id="partitura-card-list" class="partitura-card-list"></div>
+        <div id="no-data-msg" class="hidden">
+            Партитура пуста. Нажми «Добавить», чтобы создать запись вручную.
+        </div>
+    </div>
+</div>
+
+<script>
+    const projectData = {{ project | tojson | safe }};
+    const projectName = "{{ project_name }}";
+    const fieldsConfig = {{ fields | tojson | safe }};
+    let currentIndex = 0;
+    let saveTimer = null;
+
+    const tableBody = document.querySelector('#partitura-table tbody');
+    const noDataMsg = document.getElementById('no-data-msg');
+    const editorContainer = document.getElementById('editor-fields-container');
+    const cueNumberTitle = document.getElementById('cue-number-title');
+    const cardList = document.getElementById('partitura-card-list');
+    const translateToggle = document.getElementById('translate-toggle');
+    const saveShowToggle = document.getElementById('save-show-toggle');
+    const fieldInputs = {};
+
+    function updateTranslateButton() {
+        const translated = Boolean(projectData.partitura_translated);
+        translateToggle.classList.toggle('translate-active', translated);
+        translateToggle.title = translated ? 'Вернуть оригинал' : 'Перевести';
+        translateToggle.setAttribute('aria-label', translateToggle.title);
+    }
+
+    function initEditorFields() {
+        editorContainer.innerHTML = '';
+        fieldsConfig.forEach(f => {
+            const wrapper = document.createElement('div');
+            wrapper.className = 'editor-field';
+            const label = document.createElement('label');
+            label.innerText = f.title;
+            wrapper.appendChild(label);
+
+            let input;
+            if (f.field_id === 'trigger') {
+                input = document.createElement('select');
+                ['Go', 'Time', 'Follow', 'Sound', 'BPM', 'SMPTE', 'Midi'].forEach(opt => {
+                    const option = document.createElement('option');
+                    option.value = opt;
+                    option.text = opt;
+                    input.appendChild(option);
+                });
+            } else if (['info', 'command', 'name'].includes(f.field_id)) {
+                input = document.createElement('textarea');
+                input.rows = f.field_id === 'name' ? 2 : 3;
+            } else {
+                input = document.createElement('input');
+                input.type = 'text';
+            }
+            input.id = `cue-${f.field_id}`;
+            input.placeholder = f.title;
+            input.addEventListener('input', scheduleSave);
+            input.addEventListener('blur', saveCurrentRow);
+            fieldInputs[f.field_id] = input;
+            wrapper.appendChild(input);
+            editorContainer.appendChild(wrapper);
+        });
+    }
+
+    function scheduleSave() {
+        clearTimeout(saveTimer);
+        saveTimer = setTimeout(saveCurrentRow, 500);
+    }
+
+    function renderTable() {
+        const rows = projectData.partitura || [];
+        document.getElementById('partitura-count').innerText = `Строк: ${rows.length}`;
+        if (!rows.length) {
+            noDataMsg.classList.remove('hidden');
+            tableBody.innerHTML = '';
+            cardList.innerHTML = '';
+            editorContainer.style.opacity = '0.4';
+            editorContainer.style.pointerEvents = 'none';
+            return;
+        }
+
+        noDataMsg.classList.add('hidden');
+        editorContainer.style.opacity = '1';
+        editorContainer.style.pointerEvents = 'auto';
+        tableBody.innerHTML = '';
+        cardList.innerHTML = '';
+
+        rows.forEach((row, index) => {
+            const tr = document.createElement('tr');
+            if (index === currentIndex) tr.className = 'selected';
+            tr.onclick = () => selectRow(index);
+            tr.innerHTML = fieldsConfig.map(f => {
+                const val = row[f.field_id] || '';
+                return `<td>${String(val).replaceAll('<', '&lt;')}</td>`;
+            }).join('');
+            tableBody.appendChild(tr);
+
+            const card = document.createElement('button');
+            card.type = 'button';
+            card.className = 'cue-card' + (index === currentIndex ? ' selected' : '');
+            card.onclick = () => selectRow(index);
+            const name = row.name || '';
+            const info = row.info || '';
+            card.innerHTML = `
+                <strong>${row.number || `#${index + 1}`}</strong>
+                <div>${name}</div>
+                ${info ? `<div class="muted">${info}</div>` : ''}
+            `;
+            cardList.appendChild(card);
+        });
+    }
+
+    function selectRow(index) {
+        saveCurrentRow();
+        const rows = projectData.partitura || [];
+        if (index < 0 || index >= rows.length) return;
+        currentIndex = index;
+        const row = rows[index];
+        cueNumberTitle.innerText = 'Кью ' + (row.number || `#${index + 1}`);
+        Object.keys(fieldInputs).forEach(fid => {
+            fieldInputs[fid].value = row[fid] || '';
+        });
+        renderTable();
+        const selectedTr = tableBody.querySelector('.selected');
+        if (selectedTr) selectedTr.scrollIntoView({ block: 'nearest' });
+        const selectedCard = cardList.querySelector('.selected');
+        if (selectedCard) selectedCard.scrollIntoView({ block: 'nearest' });
+    }
+
+    async function saveCurrentRow() {
+        const rows = projectData.partitura || [];
+        if (!rows.length) return;
+        const row = rows[currentIndex];
+        const updates = {};
+        let changed = false;
+        Object.keys(fieldInputs).forEach(fid => {
+            const val = fieldInputs[fid].value;
+            if (row[fid] !== val) {
+                row[fid] = val;
+                updates[fid] = val;
+                changed = true;
+            }
+        });
+        if (!changed) return;
+        renderTable();
+        const formData = new FormData();
+        formData.append('index', currentIndex);
+        Object.keys(updates).forEach(fid => formData.append(fid, updates[fid]));
+        await fetch(`/projects/${encodeURIComponent(projectName)}/update_partitura`, {
+            method: 'POST',
+            body: formData
+        });
+    }
+
+    async function addRow() {
+        const formData = new FormData();
+        formData.append('index', currentIndex);
+        const response = await fetch(`/projects/${encodeURIComponent(projectName)}/add_partitura_row`, {
+            method: 'POST',
+            body: formData
+        });
+        if (response.ok) {
+            if (!projectData.partitura) projectData.partitura = [];
+            const newRow = { number: "Новое", name: "Реплика" };
+            fieldsConfig.forEach(f => { if (!newRow[f.field_id]) newRow[f.field_id] = ""; });
+            const insertIdx = projectData.partitura.length ? currentIndex + 1 : 0;
+            projectData.partitura.splice(insertIdx, 0, newRow);
+            selectRow(insertIdx);
+        }
+    }
+
+    async function deleteRow() {
+        if (!projectData.partitura?.length) return;
+        if (!confirm('Удалить эту запись?')) return;
+        const formData = new FormData();
+        formData.append('index', currentIndex);
+        const response = await fetch(`/projects/${encodeURIComponent(projectName)}/delete_partitura_row`, {
+            method: 'POST',
+            body: formData
+        });
+        if (response.ok) {
+            projectData.partitura.splice(currentIndex, 1);
+            if (!projectData.partitura.length) renderTable();
+            else selectRow(Math.min(currentIndex, projectData.partitura.length - 1));
+        }
+    }
+
+    async function toggleTranslation() {
+        await saveCurrentRow();
+        const wasTranslated = Boolean(projectData.partitura_translated);
+        cueNumberTitle.innerText = wasTranslated ? 'Возвращаю оригинал...' : 'Перевожу...';
+        translateToggle.disabled = true;
+        const response = await fetch(`/projects/${encodeURIComponent(projectName)}/translate_partitura`, {
+            method: 'POST'
+        });
+        translateToggle.disabled = false;
+        if (!response.ok) {
+            alert(wasTranslated ? 'Не получилось вернуть оригинал.' : 'Не получилось перевести партитуру.');
+            selectRow(currentIndex);
+            return;
+        }
+        const result = await response.json();
+        projectData.partitura = result.partitura || projectData.partitura;
+        projectData.partitura_translated = Boolean(result.translated);
+        updateTranslateButton();
+        selectRow(Math.min(currentIndex, projectData.partitura.length - 1));
+    }
+
+    async function saveShowXml() {
+        await saveCurrentRow();
+        cueNumberTitle.innerText = 'Сохраняю show-файл...';
+        saveShowToggle.disabled = true;
+        const response = await fetch(`/projects/${encodeURIComponent(projectName)}/save_show_xml`, {
+            method: 'POST'
+        });
+        saveShowToggle.disabled = false;
+        if (!response.ok) {
+            alert('Не получилось сохранить show-файл.');
+            selectRow(currentIndex);
+            return;
+        }
+        const result = await response.json();
+        alert(`Создан файл: ${result.file}`);
+        selectRow(currentIndex);
+    }
+
+    async function leaveEditor(targetUrl) {
+        await saveCurrentRow();
+        if (confirm('Сохранить изменения и обновить файлы?')) {
+            cueNumberTitle.innerText = 'Собираю файлы...';
+            await fetch(`/projects/${encodeURIComponent(projectName)}/generate?ajax=1`);
+        }
+        window.location.href = targetUrl;
+    }
+
+    initEditorFields();
+    updateTranslateButton();
+    if (projectData.partitura?.length) selectRow(0);
+    else renderTable();
+</script>
+{% endblock %}

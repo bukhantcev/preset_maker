@@ -1,0 +1,568 @@
+{% extends "base.html" %}
+
+{% block head %}
+<style>
+    .workspace {
+        display: grid;
+        grid-template-columns: minmax(360px, 1fr) minmax(420px, 1fr);
+        gap: 18px;
+        height: calc(100vh - 122px);
+        overflow: hidden;
+    }
+    .builder-panel {
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+    }
+    .list-panel {
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+    }
+    .camera-row { display: block; }
+    .photo-preview {
+        background: var(--panel);
+        aspect-ratio: 16 / 9;
+        width: 100%;
+        border-radius: var(--radius);
+        border: 1px solid var(--line);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        overflow: hidden;
+        position: relative;
+        flex-shrink: 0;
+    }
+    .photo-preview img,
+    .photo-preview video {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        background: #050505;
+    }
+    .photo-empty {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 10px;
+        padding: 20px;
+        text-align: center;
+        color: var(--silver);
+    }
+    .photo-empty button { min-width: 220px; }
+    #delete-photo-btn {
+        position: absolute;
+        top: 5px;
+        left: 5px;
+        z-index: 20;
+        min-height: 24px;
+        padding: 3px 7px;
+        font-size: 10px;
+        border-width: 1px;
+        width: auto;
+    }
+    #description {
+        min-height: 110px;
+        flex: 1;
+        resize: none;
+        background: #101010;
+    }
+    .controls {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+    }
+    .table-wrap {
+        min-height: 0;
+        overflow: auto;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--panel);
+    }
+    table {
+        width: 100%;
+        border-collapse: collapse;
+        background: var(--panel);
+    }
+    th, td {
+        border-bottom: 1px solid var(--line);
+        padding: 10px;
+        text-align: left;
+        font-size: 14px;
+    }
+    th {
+        background: #050505;
+        color: var(--yellow);
+        position: sticky;
+        top: 0;
+        z-index: 10;
+    }
+    tr { cursor: pointer; }
+    tr.selected {
+        background: var(--yellow);
+        color: #000;
+        font-weight: 900;
+    }
+    tr:hover:not(.selected) { background: var(--panel-2); }
+    .preset-card-list {
+        display: none;
+        gap: 10px;
+        overflow: auto;
+        min-height: 0;
+    }
+    .preset-card {
+        width: 100%;
+        color: #fff;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        padding: 14px;
+        text-align: left;
+        display: grid;
+        gap: 7px;
+    }
+    .preset-card.selected {
+        background: var(--yellow);
+        color: #000;
+        border-color: var(--yellow);
+        font-weight: 900;
+    }
+    .preset-card .line {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        overflow-wrap: anywhere;
+    }
+    .photo-mark { color: var(--green); font-weight: 900; }
+    .selected .photo-mark { color: #000; }
+    .progress-line {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        align-items: center;
+        color: var(--silver);
+        font-weight: 800;
+    }
+    @media (max-width: 850px) {
+        .workspace {
+            height: auto;
+            overflow: visible;
+            grid-template-columns: 1fr;
+        }
+        .camera-row { display: none; }
+        .photo-preview { aspect-ratio: 4 / 3; }
+        .table-wrap { display: none; }
+        .preset-card-list {
+            display: grid;
+            max-height: 48vh;
+        }
+        .controls { grid-template-columns: 1fr 1fr; }
+        #description { min-height: 92px; flex: 0 0 auto; }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="header">
+    <div>
+        <h1>{{ project.title }}</h1>
+        <div id="current-item-title" class="muted" style="margin-top: 6px; font-weight: 800;">Пресет...</div>
+    </div>
+    <div class="header-actions">
+        <button type="button" onclick="leaveEditor('/')" class="btn-silver">Назад</button>
+        <button type="button" onclick="leaveEditor('/projects/{{ project_name }}/partitura')" class="btn-silver">Партитура</button>
+    </div>
+</div>
+
+<div class="workspace">
+    <div class="builder-panel">
+        <div class="camera-row">
+            <select id="camera-select"></select>
+        </div>
+
+        <div class="photo-preview" id="photo-preview-container">
+            <video id="camera-video" autoplay playsinline></video>
+            <canvas id="camera-canvas" class="hidden"></canvas>
+            <img id="photo-img" src="" class="hidden">
+            <div id="photo-placeholder" class="photo-empty hidden">
+                <button type="button" class="btn-yellow" onclick="choosePhotoFile()">Загрузить фото</button>
+                <div>или нажми «Фото» внизу</div>
+            </div>
+            <button type="button" class="btn-danger hidden" id="delete-photo-btn" onclick="deletePhoto()">Удалить</button>
+        </div>
+
+        <textarea id="description" placeholder="Напиши тут описание пресета."></textarea>
+
+        <div class="controls">
+            <button type="button" class="btn-yellow" id="capture-btn" onclick="capturePhoto()">Фото</button>
+            <button type="button" class="btn-yellow hidden" id="confirm-btn" onclick="confirmPhoto()">Готово</button>
+            <button type="button" class="btn-danger hidden" id="retake-btn" onclick="retakePhoto()">Переснять</button>
+            <button type="button" class="btn-yellow hidden" id="add-row-btn" onclick="addRow()">Добавить</button>
+            <button type="button" class="btn-danger" id="delete-row-btn" onclick="deleteRow()">Удалить запись</button>
+        </div>
+
+        <input type="file" id="camera-input" accept="image/*" class="hidden" onchange="previewFromFile(this)">
+        <input type="file" id="mobile-camera-input" accept="image/*" capture="environment" class="hidden" onchange="previewFromFile(this)">
+    </div>
+
+    <div class="list-panel">
+        <div class="progress-line">
+            <span id="progress-text">0 / 0 с фото</span>
+            <span id="row-count-text">Строк: 0</span>
+        </div>
+        <div class="table-wrap">
+            <table id="preset-table">
+                <thead>
+                    <tr>
+                        <th style="width: 58px; text-align: center;">Фото</th>
+                        <th>Пресет</th>
+                        <th style="width: 90px;">Прибор</th>
+                        <th>Описание</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
+        <div id="preset-card-list" class="preset-card-list"></div>
+    </div>
+</div>
+
+<script>
+    const projectData = {{ project | tojson | safe }};
+    const projectName = "{{ project_name }}";
+    let currentIndex = 0;
+    let stream = null;
+    let capturedBlob = null;
+    let descriptionSaveTimer = null;
+
+    const tableBody = document.querySelector('#preset-table tbody');
+    const cardList = document.getElementById('preset-card-list');
+    const photoImg = document.getElementById('photo-img');
+    const photoPlaceholder = document.getElementById('photo-placeholder');
+    const descriptionInput = document.getElementById('description');
+    const video = document.getElementById('camera-video');
+    const canvas = document.getElementById('camera-canvas');
+    const captureBtn = document.getElementById('capture-btn');
+    const confirmBtn = document.getElementById('confirm-btn');
+    const retakeBtn = document.getElementById('retake-btn');
+    const cameraSelect = document.getElementById('camera-select');
+    const addRowBtn = document.getElementById('add-row-btn');
+    const deletePhotoBtn = document.getElementById('delete-photo-btn');
+
+    function isMobileCapture() {
+        return window.matchMedia('(max-width: 850px)').matches;
+    }
+
+    async function initCamera() {
+        if (isMobileCapture()) {
+            cameraSelect.classList.add('hidden');
+            showEmptyPhoto();
+            return;
+        }
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            cameraSelect.classList.add('hidden');
+            showEmptyPhoto();
+            return;
+        }
+        try {
+            const probe = await navigator.mediaDevices.getUserMedia({ video: true });
+            probe.getTracks().forEach(t => t.stop());
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const videoDevices = devices.filter(d => d.kind === 'videoinput');
+            cameraSelect.innerHTML = '';
+            if (!videoDevices.length) {
+                cameraSelect.classList.add('hidden');
+                showEmptyPhoto();
+                return;
+            }
+            const savedId = localStorage.getItem('selectedCameraId');
+            let targetId = savedId && videoDevices.some(d => d.deviceId === savedId) ? savedId : videoDevices[0].deviceId;
+            videoDevices.forEach((d, i) => {
+                const opt = document.createElement('option');
+                opt.value = d.deviceId;
+                opt.text = d.label || `Камера ${i + 1}`;
+                opt.selected = d.deviceId === targetId;
+                cameraSelect.appendChild(opt);
+            });
+            await startStream(targetId);
+            selectRow(currentIndex);
+        } catch(e) {
+            console.error("Camera init error:", e);
+            showEmptyPhoto();
+        }
+    }
+
+    async function startStream(deviceId) {
+        if (stream) stream.getTracks().forEach(t => t.stop());
+        try {
+            stream = await navigator.mediaDevices.getUserMedia({
+                video: { deviceId: { exact: deviceId } },
+                audio: false
+            });
+            video.srcObject = stream;
+        } catch(e) {
+            console.error("Stream start error:", e);
+            showEmptyPhoto();
+        }
+    }
+
+    cameraSelect.onchange = async () => {
+        localStorage.setItem('selectedCameraId', cameraSelect.value);
+        await startStream(cameraSelect.value);
+        selectRow(currentIndex);
+    };
+
+    window.addEventListener('beforeunload', () => {
+        if (stream) stream.getTracks().forEach(t => t.stop());
+    });
+
+    function capturePhoto() {
+        if (isMobileCapture()) {
+            document.getElementById('mobile-camera-input').click();
+            return;
+        }
+        if (!stream || !video.videoWidth) {
+            alert('Камера не подключена. Используй «Загрузить фото».');
+            return;
+        }
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+        canvas.toBlob((blob) => showCapturedPreview(blob), 'image/jpeg', 0.9);
+    }
+
+    function previewFromFile(input) {
+        if (input.files && input.files[0]) showCapturedPreview(input.files[0]);
+        input.value = '';
+    }
+
+    function choosePhotoFile() {
+        document.getElementById('camera-input').click();
+    }
+
+    function showCapturedPreview(blob) {
+        capturedBlob = blob;
+        photoImg.src = URL.createObjectURL(blob);
+        photoImg.classList.remove('hidden');
+        video.classList.add('hidden');
+        photoPlaceholder.classList.add('hidden');
+        deletePhotoBtn.classList.add('hidden');
+        captureBtn.classList.add('hidden');
+        addRowBtn.classList.add('hidden');
+        confirmBtn.classList.remove('hidden');
+        retakeBtn.classList.remove('hidden');
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+
+    async function confirmPhoto() {
+        if (!capturedBlob) return;
+        await uploadPhotoBlob(capturedBlob);
+        capturedBlob = null;
+    }
+
+    function retakePhoto() {
+        capturedBlob = null;
+        selectRow(currentIndex);
+    }
+
+    function showEmptyPhoto() {
+        photoPlaceholder.innerHTML = '<button type="button" class="btn-yellow" onclick="choosePhotoFile()">Загрузить фото</button><div>или нажми «Фото» внизу</div>';
+        photoImg.classList.add('hidden');
+        video.classList.add('hidden');
+        photoPlaceholder.classList.remove('hidden');
+        deletePhotoBtn.classList.add('hidden');
+    }
+
+    async function uploadPhotoBlob(blob) {
+        photoPlaceholder.classList.remove('hidden');
+        photoPlaceholder.innerHTML = '<div class="yellow" style="font-weight:900;">Сохранение фото...</div>';
+        photoImg.classList.add('hidden');
+        video.classList.add('hidden');
+
+        const formData = new FormData();
+        formData.append('index', currentIndex);
+        formData.append('photo', blob, 'photo.jpg');
+
+        const response = await fetch(`/projects/${encodeURIComponent(projectName)}/upload_photo`, {
+            method: 'POST',
+            body: formData
+        });
+        const result = await response.json();
+        if (result.status === 'ok') {
+            projectData.rows[currentIndex].photo_path = result.photo_path;
+            let nextIdx = currentIndex + 1;
+            while (nextIdx < projectData.rows.length && projectData.rows[nextIdx].photo_path) nextIdx++;
+            selectRow(nextIdx < projectData.rows.length ? nextIdx : currentIndex);
+        } else {
+            alert('Ошибка загрузки фото');
+            selectRow(currentIndex);
+        }
+    }
+
+    function renderTable() {
+        tableBody.innerHTML = '';
+        cardList.innerHTML = '';
+        let photoCount = 0;
+        projectData.rows.forEach((row, index) => {
+            if (row.photo_path) photoCount++;
+            const selected = index === currentIndex;
+            const mark = row.photo_path ? '✓' : '';
+
+            const tr = document.createElement('tr');
+            if (selected) tr.className = 'selected';
+            tr.onclick = () => selectRow(index);
+            tr.innerHTML = `
+                <td style="text-align:center;">${mark}</td>
+                <td>${row.preset_label}</td>
+                <td>${row.fixture_id}</td>
+                <td class="muted">${row.description || ''}</td>
+            `;
+            tableBody.appendChild(tr);
+
+            const card = document.createElement('button');
+            card.type = 'button';
+            card.className = 'preset-card' + (selected ? ' selected' : '');
+            card.onclick = () => selectRow(index);
+            card.innerHTML = `
+                <div class="line"><span>${index + 1}/${projectData.rows.length}</span><span class="photo-mark">${mark}</span></div>
+                <div class="line"><strong>${row.preset_label}</strong><strong>${row.fixture_id}</strong></div>
+                <div class="muted">${row.description || '&nbsp;'}</div>
+            `;
+            cardList.appendChild(card);
+        });
+        document.getElementById('progress-text').innerText = `${photoCount} / ${projectData.rows.length} с фото`;
+        document.getElementById('row-count-text').innerText = `Строк: ${projectData.rows.length}`;
+    }
+
+    function selectRow(index) {
+        if (index < 0 || index >= projectData.rows.length) return;
+        saveDescriptionNow();
+        currentIndex = index;
+        const row = projectData.rows[index];
+
+        document.getElementById('current-item-title').innerText = `${index + 1}/${projectData.rows.length}  Пресет: ${row.preset_label}  Прибор: ${row.fixture_id}`;
+        descriptionInput.value = row.description || '';
+        capturedBlob = null;
+        confirmBtn.classList.add('hidden');
+        retakeBtn.classList.add('hidden');
+        captureBtn.classList.remove('hidden');
+        addRowBtn.classList.toggle('hidden', !row.photo_path);
+
+        if (row.photo_path) {
+            photoImg.src = `/projects/${encodeURIComponent(projectName)}/photos/${encodeURIComponent(row.photo_path.split('/').pop())}?t=${Date.now()}`;
+            photoImg.classList.remove('hidden');
+            video.classList.add('hidden');
+            photoPlaceholder.classList.add('hidden');
+            deletePhotoBtn.classList.remove('hidden');
+            captureBtn.innerText = 'Переснять';
+        } else {
+            photoImg.src = '';
+            photoImg.classList.add('hidden');
+            deletePhotoBtn.classList.add('hidden');
+            captureBtn.innerText = 'Фото';
+            if (stream && !isMobileCapture()) {
+                video.classList.remove('hidden');
+                photoPlaceholder.classList.add('hidden');
+            } else {
+                showEmptyPhoto();
+            }
+        }
+        renderTable();
+        const selectedTr = tableBody.querySelector('.selected');
+        if (selectedTr) selectedTr.scrollIntoView({ block: 'nearest' });
+        const selectedCard = cardList.querySelector('.selected');
+        if (selectedCard) selectedCard.scrollIntoView({ block: 'nearest' });
+    }
+
+    async function saveDescriptionNow() {
+        if (!projectData.rows.length) return;
+        const val = descriptionInput.value;
+        if (projectData.rows[currentIndex]?.description === val) return;
+        projectData.rows[currentIndex].description = val;
+        renderTable();
+        const formData = new FormData();
+        formData.append('index', currentIndex);
+        formData.append('description', val);
+        await fetch(`/projects/${encodeURIComponent(projectName)}/update_description`, {
+            method: 'POST',
+            body: formData
+        });
+    }
+
+    descriptionInput.addEventListener('input', () => {
+        clearTimeout(descriptionSaveTimer);
+        descriptionSaveTimer = setTimeout(saveDescriptionNow, 500);
+    });
+    descriptionInput.addEventListener('blur', saveDescriptionNow);
+
+    async function addRow() {
+        const formData = new FormData();
+        formData.append('index', currentIndex);
+        const response = await fetch(`/projects/${encodeURIComponent(projectName)}/add_row`, {
+            method: 'POST',
+            body: formData
+        });
+        if (response.ok) {
+            const baseRow = projectData.rows[currentIndex];
+            projectData.rows.splice(currentIndex + 1, 0, {
+                preset_label: baseRow.preset_label,
+                fixture_id: baseRow.fixture_id,
+                preset_no: baseRow.preset_no,
+                photo_path: "",
+                description: ""
+            });
+            selectRow(currentIndex + 1);
+        }
+    }
+
+    async function deleteRow() {
+        if (projectData.rows.length <= 1) {
+            alert("Последнюю запись удалить нельзя.");
+            return;
+        }
+        if (!confirm(`Удалить запись ${projectData.rows[currentIndex].preset_label} | ${projectData.rows[currentIndex].fixture_id}?`)) return;
+        const formData = new FormData();
+        formData.append('index', currentIndex);
+        const response = await fetch(`/projects/${encodeURIComponent(projectName)}/delete_row`, {
+            method: 'POST',
+            body: formData
+        });
+        if (response.ok) {
+            projectData.rows.splice(currentIndex, 1);
+            selectRow(Math.min(currentIndex, projectData.rows.length - 1));
+        }
+    }
+
+    async function deletePhoto() {
+        if (!confirm('Удалить фото?')) return;
+        const formData = new FormData();
+        formData.append('index', currentIndex);
+        await fetch(`/projects/${encodeURIComponent(projectName)}/delete_photo`, {
+            method: 'POST',
+            body: formData
+        });
+        projectData.rows[currentIndex].photo_path = '';
+        selectRow(currentIndex);
+    }
+
+    async function leaveEditor(targetUrl) {
+        await saveDescriptionNow();
+        if (confirm('Сохранить изменения и обновить файлы?')) {
+            const oldText = document.getElementById('current-item-title').innerText;
+            document.getElementById('current-item-title').innerText = 'Собираю файлы...';
+            await fetch(`/projects/${encodeURIComponent(projectName)}/generate?ajax=1`);
+            document.getElementById('current-item-title').innerText = oldText;
+        }
+        window.location.href = targetUrl;
+    }
+
+    window.onload = async () => {
+        renderTable();
+        selectRow(0);
+        if (!isMobileCapture()) await initCamera();
+    };
+</script>
+{% endblock %}

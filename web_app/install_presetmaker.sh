@@ -165,6 +165,50 @@ server {
 }
 EOF
   run_as_root ln -sf "${nginx_path}" "/etc/nginx/sites-enabled/${APP_NAME}"
+  run_as_root rm -f /etc/nginx/sites-enabled/default
+  run_as_root nginx -t
+  run_as_root systemctl reload nginx
+}
+
+write_nginx_https() {
+  local domain="$1"
+  local nginx_path="/etc/nginx/sites-available/${APP_NAME}"
+  run_as_root tee "${nginx_path}" >/dev/null <<EOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${domain};
+    return 301 https://\$host\$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name ${domain};
+
+    ssl_certificate /etc/letsencrypt/live/${domain}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${domain}/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+    client_max_body_size 500m;
+
+    location / {
+        proxy_pass http://127.0.0.1:${HTTP_PORT};
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 300;
+        proxy_send_timeout 300;
+    }
+}
+EOF
+  run_as_root ln -sf "${nginx_path}" "/etc/nginx/sites-enabled/${APP_NAME}"
+  run_as_root rm -f /etc/nginx/sites-enabled/default
   run_as_root nginx -t
   run_as_root systemctl reload nginx
 }
@@ -180,12 +224,14 @@ issue_certificate() {
   local domain="$1"
   local email="$2"
   echo "Выпускаю SSL-сертификат Let's Encrypt для ${domain}..."
-  run_as_root certbot --nginx \
+  run_as_root certbot certonly --nginx \
     --non-interactive \
     --agree-tos \
-    --redirect \
+    --keep-until-expiring \
     --email "${email}" \
+    --cert-name "${domain}" \
     -d "${domain}"
+  write_nginx_https "${domain}"
 }
 
 main() {

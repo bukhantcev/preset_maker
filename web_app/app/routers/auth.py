@@ -40,6 +40,32 @@ def verify_password(plain_password, hashed_password):
 def get_password_hash(password):
     return pwd_context.hash(password)
 
+def get_yandex_email(user_info):
+    email = user_info.get('default_email') or user_info.get('email')
+    if isinstance(email, str) and email.strip():
+        return email.strip().lower()
+
+    emails = user_info.get('emails') or []
+    if isinstance(emails, str):
+        emails = [emails]
+    for item in emails:
+        if isinstance(item, str) and item.strip():
+            return item.strip().lower()
+        if isinstance(item, dict):
+            value = item.get('address') or item.get('email')
+            if isinstance(value, str) and value.strip():
+                return value.strip().lower()
+
+    yandex_id = user_info.get('id')
+    if yandex_id:
+        return f"yandex-{yandex_id}@passport.local"
+
+    login = user_info.get('login')
+    if isinstance(login, str) and login.strip():
+        return f"{login.strip().lower()}@passport.local"
+
+    return None
+
 @router.post("/register")
 async def register(request: Request, email: str = Form(...), password: str = Form(...), db: Session = Depends(database.get_db)):
     email = email.strip().lower()
@@ -91,13 +117,21 @@ async def auth_yandex_callback(request: Request, db: Session = Depends(database.
         
     resp = await oauth.yandex.get('info', token=token)
     user_info = resp.json()
+    print(
+        "YANDEX_AUTH_USER_INFO_KEYS:",
+        sorted(user_info.keys()),
+        "has_default_email=",
+        bool(user_info.get('default_email')),
+        "has_emails=",
+        bool(user_info.get('emails')),
+        flush=True,
+    )
     
     yandex_id = user_info.get('id')
-    email = user_info.get('default_email')
+    email = get_yandex_email(user_info)
     
     if not email:
         return RedirectResponse(url="/?error=Не%20удалось%20получить%20email%20от%20Yandex", status_code=303)
-    email = email.strip().lower()
         
     db_user = db.query(models.User).filter((models.User.yandex_id == yandex_id) | (models.User.email == email)).first()
     

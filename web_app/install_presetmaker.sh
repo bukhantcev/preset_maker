@@ -5,6 +5,7 @@ APP_NAME="presetmaker"
 APP_IMAGE_DEFAULT="chtotos/presetmaker:latest"
 APP_DIR_DEFAULT="/opt/presetmaker"
 HTTP_PORT="8000"
+CERTBOT_WEBROOT="/var/www/presetmaker-certbot"
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1
@@ -142,6 +143,7 @@ EOF
 write_nginx_http() {
   local domain="$1"
   local nginx_path="/etc/nginx/sites-available/${APP_NAME}"
+  run_as_root mkdir -p "${CERTBOT_WEBROOT}"
   run_as_root tee "${nginx_path}" >/dev/null <<EOF
 server {
     listen 80;
@@ -149,6 +151,10 @@ server {
     server_name ${domain};
 
     client_max_body_size 500m;
+
+    location /.well-known/acme-challenge/ {
+        root ${CERTBOT_WEBROOT};
+    }
 
     location / {
         proxy_pass http://127.0.0.1:${HTTP_PORT};
@@ -165,7 +171,6 @@ server {
 }
 EOF
   run_as_root ln -sf "${nginx_path}" "/etc/nginx/sites-enabled/${APP_NAME}"
-  run_as_root rm -f /etc/nginx/sites-enabled/default
   run_as_root nginx -t
   run_as_root systemctl reload nginx
 }
@@ -178,7 +183,14 @@ server {
     listen 80;
     listen [::]:80;
     server_name ${domain};
-    return 301 https://\$host\$request_uri;
+
+    location /.well-known/acme-challenge/ {
+        root ${CERTBOT_WEBROOT};
+    }
+
+    location / {
+        return 301 https://\$host\$request_uri;
+    }
 }
 
 server {
@@ -208,7 +220,6 @@ server {
 }
 EOF
   run_as_root ln -sf "${nginx_path}" "/etc/nginx/sites-enabled/${APP_NAME}"
-  run_as_root rm -f /etc/nginx/sites-enabled/default
   run_as_root nginx -t
   run_as_root systemctl reload nginx
 }
@@ -224,10 +235,12 @@ issue_certificate() {
   local domain="$1"
   local email="$2"
   echo "Выпускаю SSL-сертификат Let's Encrypt для ${domain}..."
-  run_as_root certbot certonly --nginx \
+  run_as_root mkdir -p "${CERTBOT_WEBROOT}"
+  run_as_root certbot certonly --webroot \
     --non-interactive \
     --agree-tos \
     --keep-until-expiring \
+    --webroot-path "${CERTBOT_WEBROOT}" \
     --email "${email}" \
     --cert-name "${domain}" \
     -d "${domain}"

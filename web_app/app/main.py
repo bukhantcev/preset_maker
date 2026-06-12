@@ -51,6 +51,14 @@ app.include_router(settings.router, prefix="/settings", tags=["settings"])
 app.include_router(admin.router, prefix="/admin", tags=["admin"])
 app.include_router(profile.router, prefix="/profile", tags=["profile"])
 
+def cloud_storage_label(user: models.User) -> str:
+    labels = {
+        "temp": "не выбрано",
+        "sftp": "SFTP",
+        "yandex_disk": "Яндекс.Диск",
+    }
+    return labels.get(user.storage_mode or "", user.storage_mode or "не выбрано")
+
 @app.get("/")
 async def read_root(request: Request, db: Session = Depends(get_db)):
     user_session = request.session.get("user")
@@ -85,6 +93,7 @@ async def read_root(request: Request, db: Session = Depends(get_db)):
             "is_admin": is_admin,
             "projects": sorted(list(local_projects)),
             "project_retention": project_retention,
-            "cloud_projects": sorted(cloud_projects)
+            "cloud_projects": sorted(cloud_projects),
+            "cloud_storage_label": cloud_storage_label(db_user),
         })
     return templates.TemplateResponse(request, "login.html")

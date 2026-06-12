@@ -65,6 +65,7 @@
         <div id="tab-cloud" class="project-list hidden">
             <div class="cloud-status">
                 <span>Облако</span>
+                <strong class="cloud-provider">Подключено: {{ cloud_storage_label }}</strong>
                 <div id="cloud-status-msg" class="muted">Загрузка списка проектов...</div>
             </div>
             <div id="cloud-projects-list" class="project-list"></div>
@@ -260,6 +261,11 @@
         color: var(--yellow);
         font-weight: 900;
         font-size: 18px;
+    }
+    .cloud-provider {
+        color: #fff;
+        font-size: 15px;
+        overflow-wrap: anywhere;
     }
     .project-bar {
         min-height: 60px;

@@ -1,63 +1,220 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="header">
-    <h1>Панель администратора</h1>
-    <a href="/" class="btn-silver">Вернуться на главную</a>
+<div class="admin-header">
+    <a href="/" class="btn-silver">Назад</a>
+    <h1>Админка</h1>
 </div>
 
-<div class="panel">
-    <h2>Пользователи системы</h2>
-    <div style="overflow-x: auto;">
-        <table style="width: 100%; border-collapse: collapse; background-color: #141414;">
-            <thead>
-                <tr>
-                    <th style="border: 1px solid #333; padding: 10px; background-color: #000; color: #ffb800; text-align: left;">ID</th>
-                    <th style="border: 1px solid #333; padding: 10px; background-color: #000; color: #ffb800; text-align: left;">Email</th>
-                    <th style="border: 1px solid #333; padding: 10px; background-color: #000; color: #ffb800; text-align: left;">Роль</th>
-                    <th style="border: 1px solid #333; padding: 10px; background-color: #000; color: #ffb800; text-align: left;">Хранилище</th>
-                    <th style="border: 1px solid #333; padding: 10px; background-color: #000; color: #ffb800; text-align: center;">Проекты</th>
-                    <th style="border: 1px solid #333; padding: 10px; background-color: #000; color: #ffb800; text-align: left;">Размер на сервере</th>
-                    <th style="border: 1px solid #333; padding: 10px; background-color: #000; color: #ffb800; text-align: left;">Регистрация</th>
-                    <th style="border: 1px solid #333; padding: 10px; background-color: #000; color: #ffb800; text-align: center;">Действия</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for u in users %}
-                <tr style="background-color: #0a0a0a;">
-                    <td style="border: 1px solid #333; padding: 10px;">{{ u.id }}</td>
-                    <td style="border: 1px solid #333; padding: 10px; font-weight: bold;">{{ u.email }}</td>
-                    <td style="border: 1px solid #333; padding: 10px; color: {% if u.is_admin %}#ff4545{% else %}#9c9c9c{% endif %}; font-weight: {% if u.is_admin %}bold{% else %}normal{% endif %};">
-                        {% if u.is_admin %}Администратор{% else %}Пользователь{% endif %}
-                    </td>
-                    <td style="border: 1px solid #333; padding: 10px;">
-                        {% if u.storage_mode == 'temp' %}
-                            <span style="color: #9c9c9c;">Временное (сервер)</span>
-                        {% elif u.storage_mode == 'sftp' %}
-                            <span style="color: #4ee06d;">Свой SFTP</span>
-                        {% else %}
-                            {{ u.storage_mode }}
-                        {% endif %}
-                    </td>
-                    <td style="border: 1px solid #333; padding: 10px; text-align: center; color: #ffb800; font-weight: bold;">{{ u.project_count }}</td>
-                    <td style="border: 1px solid #333; padding: 10px;">{{ u.size_mb }} МБ</td>
-                    <td style="border: 1px solid #333; padding: 10px; color: #9c9c9c; font-size: 13px;">{{ u.created_at.strftime('%Y-%m-%d %H:%M') if u.created_at else 'N/A' }}</td>
-                    <td style="border: 1px solid #333; padding: 10px; text-align: center; display: flex; gap: 5px; justify-content: center;">
-                        <form action="/admin/user/{{ u.id }}/clear_projects" method="post" onsubmit="return confirm('Удалить ВСЕ проекты пользователя {{ u.email }}? Это освободит место на сервере.');">
-                            <button type="submit" class="btn-silver" style="padding: 4px 8px; font-size: 11px;">Очистить проекты</button>
-                        </form>
-                        <form action="/admin/user/{{ u.id }}/reset_password" method="post" onsubmit="return confirm('Сбросить пароль для {{ u.email }} на временный?');">
-                            <button type="submit" class="btn-yellow" style="padding: 4px 8px; font-size: 11px; color: #000;">Сбросить пароль</button>
-                        </form>
-                        {% if not u.is_admin or u.id != admin_user.id %}
-                        <form action="/admin/user/{{ u.id }}/delete" method="post" onsubmit="return confirm('Удалить пользователя {{ u.email }} и все его данные безвозвратно?');">
-                            <button type="submit" class="btn-danger" style="padding: 4px 8px; font-size: 11px;">Удалить</button>
-                        </form>
-                        {% endif %}
-                    </td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
+{% if msg %}
+<div class="panel admin-msg">{{ msg }}</div>
+{% endif %}
+
+<section class="admin-summary">
+    <div>
+        <span class="muted">Клиентов</span>
+        <strong>{{ users|length }}</strong>
     </div>
-</div>
+    <div>
+        <span class="muted">Проектов</span>
+        <strong>{{ users|sum(attribute='project_count') }}</strong>
+    </div>
+</section>
+
+<section class="admin-users">
+    {% for u in users %}
+    <details class="admin-user-card">
+        <summary>
+            <span class="admin-user-main">
+                <span class="admin-email">{{ u.email or 'Без email' }}</span>
+                <span class="admin-meta">
+                    ID {{ u.id }} · {{ u.storage_label }} · {{ u.project_count }} проект(ов)
+                </span>
+            </span>
+            <span class="admin-role {% if u.is_admin %}role-admin{% endif %}">
+                {% if u.is_admin %}Админ{% else %}Клиент{% endif %}
+            </span>
+        </summary>
+
+        <div class="admin-user-body">
+            <div class="admin-grid">
+                <div>
+                    <span class="muted">Хранилище</span>
+                    <strong>{{ u.storage_label }}</strong>
+                </div>
+                <div>
+                    <span class="muted">Проекты</span>
+                    <strong>{{ u.project_count }}</strong>
+                </div>
+                <div>
+                    <span class="muted">На сервере</span>
+                    <strong>{{ u.size_mb }} МБ</strong>
+                </div>
+                <div>
+                    <span class="muted">Регистрация</span>
+                    <strong>{{ u.created_at.strftime('%Y-%m-%d %H:%M') if u.created_at else 'N/A' }}</strong>
+                </div>
+            </div>
+
+            <div class="admin-actions">
+                <form action="/admin/user/{{ u.id }}/clear_projects" method="post" onsubmit="return confirm('Удалить ВСЕ проекты пользователя {{ u.email }}?');">
+                    <button type="submit" class="btn-silver">Очистить проекты</button>
+                </form>
+                <form action="/admin/user/{{ u.id }}/reset_password" method="post" onsubmit="return confirm('Сбросить пароль для {{ u.email }} на временный?');">
+                    <button type="submit" class="btn-yellow">Сбросить пароль</button>
+                </form>
+                {% if not u.is_admin or u.id != admin_user.id %}
+                <form action="/admin/user/{{ u.id }}/delete" method="post" onsubmit="return confirm('Удалить пользователя {{ u.email }} и все его данные безвозвратно?');">
+                    <button type="submit" class="btn-danger">Удалить</button>
+                </form>
+                {% endif %}
+            </div>
+        </div>
+    </details>
+    {% endfor %}
+</section>
+
+<style>
+    .admin-header {
+        display: grid;
+        grid-template-columns: minmax(110px, 180px) 1fr;
+        gap: 14px;
+        align-items: center;
+        margin-bottom: 18px;
+        padding-bottom: 14px;
+        border-bottom: 1px solid var(--panel-2);
+    }
+    .admin-header h1 { text-align: right; }
+    .admin-msg {
+        border-color: var(--green);
+        color: var(--green);
+        text-align: center;
+        font-weight: 900;
+    }
+    .admin-summary {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+        margin-bottom: 16px;
+    }
+    .admin-summary > div,
+    .admin-user-card {
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: #0a0a0a;
+    }
+    .admin-summary > div {
+        padding: 16px;
+        display: grid;
+        gap: 6px;
+    }
+    .admin-summary strong {
+        color: var(--yellow);
+        font-size: 28px;
+    }
+    .admin-users {
+        display: grid;
+        gap: 12px;
+    }
+    .admin-user-card {
+        overflow: hidden;
+    }
+    .admin-user-card summary {
+        min-height: 72px;
+        padding: 14px;
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 12px;
+        align-items: center;
+        cursor: pointer;
+        list-style: none;
+        background: var(--panel);
+    }
+    .admin-user-card summary::-webkit-details-marker { display: none; }
+    .admin-user-card[open] summary {
+        border-bottom: 1px solid var(--line);
+        background: #101010;
+    }
+    .admin-user-main {
+        min-width: 0;
+        display: grid;
+        gap: 5px;
+    }
+    .admin-email {
+        color: var(--yellow);
+        font-size: 20px;
+        font-weight: 900;
+        overflow-wrap: anywhere;
+    }
+    .admin-meta {
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 800;
+    }
+    .admin-role {
+        border: 1px solid var(--silver);
+        color: var(--silver);
+        border-radius: 999px;
+        padding: 7px 10px;
+        font-weight: 900;
+        white-space: nowrap;
+    }
+    .role-admin {
+        border-color: var(--red);
+        color: var(--red);
+    }
+    .admin-user-body {
+        padding: 14px;
+        display: grid;
+        gap: 14px;
+    }
+    .admin-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+    }
+    .admin-grid > div {
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: #050505;
+        padding: 12px;
+        display: grid;
+        gap: 5px;
+        min-width: 0;
+    }
+    .admin-grid strong {
+        color: #fff;
+        overflow-wrap: anywhere;
+    }
+    .admin-actions {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 10px;
+    }
+    .admin-actions form { margin: 0; }
+    .admin-actions button {
+        width: 100%;
+        min-height: 54px;
+        color: currentColor;
+    }
+    @media (max-width: 760px) {
+        .admin-header {
+            grid-template-columns: 1fr;
+        }
+        .admin-header h1 {
+            text-align: left;
+            font-size: 28px;
+        }
+        .admin-summary,
+        .admin-grid,
+        .admin-actions {
+            grid-template-columns: 1fr;
+        }
+        .admin-user-card summary {
+            grid-template-columns: 1fr;
+        }
+        .admin-role {
+            justify-self: start;
+        }
+    }
+</style>
 {% endblock %}

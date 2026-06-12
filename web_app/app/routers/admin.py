@@ -9,6 +9,14 @@ from .. import database, models
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
 
+def storage_label(mode: str) -> str:
+    labels = {
+        "temp": "Сервер",
+        "sftp": "SFTP",
+        "yandex_disk": "Яндекс.Диск",
+    }
+    return labels.get(mode or "", mode or "Не выбрано")
+
 def get_admin_user(request: Request, db: Session = Depends(database.get_db)):
     user_data = request.session.get("user")
     if not user_data:
@@ -47,6 +55,7 @@ async def admin_dashboard(request: Request, msg: str = None, admin_user: models.
             "id": u.id,
             "email": u.email,
             "storage_mode": u.storage_mode,
+            "storage_label": storage_label(u.storage_mode),
             "created_at": u.created_at,
             "is_admin": u.is_admin,
             "project_count": project_count,

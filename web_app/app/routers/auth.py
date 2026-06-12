@@ -6,6 +6,8 @@ from authlib.integrations.starlette_client import OAuth
 from starlette.config import Config
 import os
 import json
+import traceback
+from urllib.parse import quote
 from .. import models, schemas, database
 
 router = APIRouter()
@@ -72,6 +74,7 @@ async def auth_yandex(request: Request):
         return Response("Ключи Yandex не настроены на сервере.", media_type="text/plain")
     redirect_uri = request.url_for('auth_yandex_callback')
     redirect_uri = str(redirect_uri).replace('http://', 'https://')
+    print(f"YANDEX_AUTH_REDIRECT_URI={redirect_uri}", flush=True)
     return await oauth.yandex.authorize_redirect(request, redirect_uri)
 
 @router.get("/yandex/callback")
@@ -79,7 +82,9 @@ async def auth_yandex_callback(request: Request, db: Session = Depends(database.
     try:
         token = await oauth.yandex.authorize_access_token(request)
     except Exception as e:
-        return RedirectResponse(url="/?error=Ошибка%20авторизации%20Yandex", status_code=303)
+        print("YANDEX_AUTH_CALLBACK_ERROR:", repr(e), flush=True)
+        traceback.print_exc()
+        return RedirectResponse(url=f"/?error={quote('Ошибка авторизации Yandex: ' + str(e))}", status_code=303)
         
     resp = await oauth.yandex.get('info', token=token)
     user_info = resp.json()
@@ -112,6 +117,7 @@ async def yandex_disk_connect(request: Request):
         return Response("Ключи Yandex не настроены.", media_type="text/plain")
     redirect_uri = request.url_for('auth_yandex_disk_callback')
     redirect_uri = str(redirect_uri).replace('http://', 'https://')
+    print(f"YANDEX_DISK_REDIRECT_URI={redirect_uri}", flush=True)
     return await oauth.yandex.authorize_redirect(request, redirect_uri)
 
 @router.get("/yandex/disk_callback")
@@ -123,7 +129,9 @@ async def auth_yandex_disk_callback(request: Request, db: Session = Depends(data
     try:
         token = await oauth.yandex.authorize_access_token(request)
     except Exception as e:
-        return RedirectResponse(url="/settings?error=Ошибка%20подключения%20Диска", status_code=303)
+        print("YANDEX_DISK_CALLBACK_ERROR:", repr(e), flush=True)
+        traceback.print_exc()
+        return RedirectResponse(url=f"/settings?error={quote('Ошибка подключения Диска: ' + str(e))}", status_code=303)
 
     user = db.query(models.User).filter(models.User.id == user_data["id"]).first()
     if user:

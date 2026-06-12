@@ -9,9 +9,33 @@ from .routers import auth, projects, settings, admin, profile
 from .routers.projects import cleanup_expired_projects, project_remaining_text, user_temp_dir
 from .cloud_sync import list_cloud_projects
 from . import models
+from .routers.auth import get_password_hash
 
 # Create tables
 Base.metadata.create_all(bind=engine)
+
+
+def ensure_env_admin() -> None:
+    email = app_settings.ADMIN_EMAIL.strip().lower()
+    password = app_settings.ADMIN_PASSWORD
+    if not email or not password:
+        return
+    db = next(get_db())
+    try:
+        user = db.query(models.User).filter(models.User.email == email).first()
+        password_hash = get_password_hash(password)
+        if user:
+            user.hashed_password = password_hash
+            user.is_admin = True
+        else:
+            user = models.User(email=email, hashed_password=password_hash, is_admin=True)
+            db.add(user)
+        db.commit()
+    finally:
+        db.close()
+
+
+ensure_env_admin()
 
 app = FastAPI(title="Passport Creator SaaS")
 

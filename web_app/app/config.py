@@ -15,5 +15,8 @@ class Settings(BaseSettings):
     
     YANDEX_CLIENT_ID: str = os.getenv("YANDEX_CLIENT_ID", "")
     YANDEX_CLIENT_SECRET: str = os.getenv("YANDEX_CLIENT_SECRET", "")
+    
+    ADMIN_EMAIL: str = os.getenv("ADMIN_EMAIL", "")
+    ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "")
 
 settings = Settings()

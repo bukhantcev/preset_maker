@@ -12,7 +12,6 @@ import sys
 import tempfile
 import threading
 import time
-import copy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional

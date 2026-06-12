@@ -158,7 +158,7 @@ async def yandex_disk_connect(request: Request):
     return await oauth.yandex.authorize_redirect(
         request,
         redirect_uri,
-        scope='cloud_api:disk.app_folder,cloud_api:disk.info',
+        scope='cloud_api:disk.app_folder',
         force_confirm='yes',
     )
 

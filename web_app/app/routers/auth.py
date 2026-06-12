@@ -40,7 +40,7 @@ async def register(request: Request, email: str = Form(...), password: str = For
     email = email.strip().lower()
     db_user = db.query(models.User).filter(models.User.email == email).first()
     if db_user:
-        raise HTTPException(status_code=400, detail="Email already registered")
+        return RedirectResponse(url="/?error=Этот%20Email%20уже%20зарегистрирован", status_code=303)
     
     hashed_password = get_password_hash(password)
     new_user = models.User(email=email, hashed_password=hashed_password, is_admin=False)
@@ -56,7 +56,7 @@ async def login(request: Request, email: str = Form(...), password: str = Form(.
     email = email.strip().lower()
     db_user = db.query(models.User).filter(models.User.email == email).first()
     if not db_user or not verify_password(password, db_user.hashed_password):
-        raise HTTPException(status_code=400, detail="Incorrect email or password")
+        return RedirectResponse(url="/?error=Неверный%20Email%20или%20пароль", status_code=303)
     
     request.session["user"] = {"id": db_user.id, "email": db_user.email}
     return RedirectResponse(url="/", status_code=303)

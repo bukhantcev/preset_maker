@@ -7,6 +7,9 @@
         <strong>Внимание</strong>
         <span>Проекты на сервере хранятся 12 часов. Чтобы сохранить проекты надолго, используйте облачные хранилища.</span>
     </div>
+    {% if request.query_params.get("error") %}
+    <div class="auth-error">{{ request.query_params.get("error") }}</div>
+    {% endif %}
 
     <div class="auth-grid">
         <form action="/auth/login" method="post" class="panel auth-panel">
@@ -52,6 +55,15 @@
         text-align: center;
     }
     .notice strong { color: var(--yellow); }
+    .auth-error {
+        border: 1px solid var(--red);
+        color: var(--red);
+        border-radius: var(--radius);
+        padding: 12px 14px;
+        background: #120000;
+        text-align: center;
+        font-weight: 800;
+    }
     .auth-grid {
         display: grid;
         grid-template-columns: 1fr 1fr;

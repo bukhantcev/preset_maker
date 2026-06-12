@@ -38,8 +38,13 @@ prompt_secret() {
   printf '%s' "${value}"
 }
 
-env_escape() {
-  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+env_quote() {
+  local value="${1//$'\r'/}"
+  if [[ "${value}" == *$'\n'* ]]; then
+    echo "Значения для .env не должны содержать перенос строки." >&2
+    exit 1
+  fi
+  printf "'%s'" "$(printf '%s' "${value}" | sed "s/'/\\\\'/g")"
 }
 
 detect_compose() {
@@ -108,13 +113,13 @@ write_env() {
   local admin_password="$6"
 
   run_as_root tee "${env_path}" >/dev/null <<EOF
-SECRET_KEY="$(env_escape "${secret_key}")"
-SQLALCHEMY_DATABASE_URL="sqlite:////data/passport_creator.db"
-BASE_TEMP_DIR="/tmp/passport_creator/users"
-YANDEX_CLIENT_ID="$(env_escape "${yandex_client_id}")"
-YANDEX_CLIENT_SECRET="$(env_escape "${yandex_client_secret}")"
-ADMIN_EMAIL="$(env_escape "${admin_email}")"
-ADMIN_PASSWORD="$(env_escape "${admin_password}")"
+SECRET_KEY=$(env_quote "${secret_key}")
+SQLALCHEMY_DATABASE_URL=$(env_quote "sqlite:////data/passport_creator.db")
+BASE_TEMP_DIR=$(env_quote "/tmp/passport_creator/users")
+YANDEX_CLIENT_ID=$(env_quote "${yandex_client_id}")
+YANDEX_CLIENT_SECRET=$(env_quote "${yandex_client_secret}")
+ADMIN_EMAIL=$(env_quote "${admin_email}")
+ADMIN_PASSWORD=$(env_quote "${admin_password}")
 EOF
   run_as_root chmod 600 "${env_path}"
 }

@@ -8,6 +8,9 @@ import json
 import httpx
 import paramiko
 import uuid
+import fcntl
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from .. import database, models
@@ -26,6 +29,8 @@ router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
 SERVER_RETENTION_HOURS = 12
 PROJECT_META_FILE = "server_project_meta.json"
+PROJECT_LOCKS: dict[str, threading.RLock] = {}
+PROJECT_LOCKS_GUARD = threading.Lock()
 
 def get_current_user(request: Request):
     user = request.session.get("user")
@@ -129,6 +134,28 @@ def row_photo_name(row: dict) -> str | None:
     value = row.get("photo_path") or row.get("photoName") or ""
     name = Path(str(value)).name if value else ""
     return name or None
+
+def project_thread_lock(project_dir: Path) -> threading.RLock:
+    key = str(project_dir.resolve() if project_dir.exists() else project_dir.absolute())
+    with PROJECT_LOCKS_GUARD:
+        lock = PROJECT_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            PROJECT_LOCKS[key] = lock
+        return lock
+
+@contextmanager
+def project_lock(project_dir: Path):
+    project_dir.mkdir(parents=True, exist_ok=True)
+    thread_lock = project_thread_lock(project_dir)
+    with thread_lock:
+        lock_path = project_dir / ".project.lock"
+        with open(lock_path, "w", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 def write_passport_state(project_dir: Path, data: dict) -> None:
     state_rows = []
@@ -249,6 +276,10 @@ def ensure_partitura_xml_keys(data: dict, project_dir: Path) -> None:
         write_project_json(project_dir, data)
 
 def load_project_data(project_dir: Path, project_name: str) -> dict:
+    with project_lock(project_dir):
+        return load_project_data_unlocked(project_dir, project_name)
+
+def load_project_data_unlocked(project_dir: Path, project_name: str) -> dict:
     json_path = project_dir / "project.json"
     if json_path.exists() and json_path.stat().st_size > 0:
         with open(json_path, "r", encoding="utf-8") as f:
@@ -286,6 +317,13 @@ def load_project_data(project_dir: Path, project_name: str) -> dict:
     data = build_project_data(project_dir, project_name)
     write_project_json(project_dir, data)
     return data
+
+def mutate_project_data(project_dir: Path, project_name: str, callback):
+    with project_lock(project_dir):
+        data = load_project_data_unlocked(project_dir, project_name)
+        result = callback(data)
+        write_project_json(project_dir, data)
+        return result
 
 def unique_photo_path(project_dir: Path, rows: list[dict], index: int) -> Path:
     row = rows[index]
@@ -614,73 +652,82 @@ async def update_partitura_row(request: Request, project_name: str):
     form = await request.form()
     idx = int(form.get("index"))
     p_dir = project_dir_for(ud["id"], project_name)
-    data = load_project_data(p_dir, project_name)
-    row = data["partitura"][idx]
-    for k, v in form.items():
-        if k != "index": row[k] = v
-    write_project_json(p_dir, data)
+    def apply_update(data: dict):
+        row = data["partitura"][idx]
+        for k, v in form.items():
+            if k != "index":
+                row[k] = v
+    mutate_project_data(p_dir, project_name, apply_update)
     return {"status": "ok"}
 
 @router.post("/{project_name}/add_partitura_row")
 async def add_partitura_row(request: Request, project_name: str, index: int = Form(0)):
     ud = get_current_user(request)
     p_dir = project_dir_for(ud["id"], project_name)
-    data = load_project_data(p_dir, project_name)
-    new_row = {"number": "Новое", "name": "Реплика"}
-    for field in PARTITURA_DEFAULT_FIELDS:
-        if field.field_id not in new_row: new_row[field.field_id] = ""
-    data["partitura"].insert(index + 1, new_row)
-    write_project_json(p_dir, data)
+    def apply_add(data: dict):
+        new_row = {"number": "Новое", "name": "Реплика"}
+        for field in PARTITURA_DEFAULT_FIELDS:
+            if field.field_id not in new_row:
+                new_row[field.field_id] = ""
+        data["partitura"].insert(index + 1, new_row)
+    mutate_project_data(p_dir, project_name, apply_add)
     return {"status": "ok"}
 
 @router.post("/{project_name}/delete_partitura_row")
 async def delete_partitura_row(request: Request, project_name: str, index: int = Form(...)):
     ud = get_current_user(request)
     p_dir = project_dir_for(ud["id"], project_name)
-    data = load_project_data(p_dir, project_name)
-    if 0 <= index < len(data["partitura"]): data["partitura"].pop(index)
-    write_project_json(p_dir, data)
+    def apply_delete(data: dict):
+        if 0 <= index < len(data["partitura"]):
+            data["partitura"].pop(index)
+    mutate_project_data(p_dir, project_name, apply_delete)
     return {"status": "ok"}
 
 @router.post("/{project_name}/translate_partitura")
 async def translate_partitura(request: Request, project_name: str):
     ud = get_current_user(request)
     p_dir = project_dir_for(ud["id"], project_name)
-    data = load_project_data(p_dir, project_name)
-    translated = bool(data.get("partitura_translated"))
-    for row in data.get("partitura", []):
-        original = row.get("_translation_original") or {}
-        if translated:
-            row["name"] = original.get("name", row.get("name", ""))
-            row["info"] = original.get("info", row.get("info", ""))
-            row.pop("_translation_original", None)
-        else:
-            row["_translation_original"] = {
-                "name": row.get("name", ""),
-                "info": row.get("info", ""),
-            }
-            row["name"] = normalize_russian_text(row.get("name", ""))
-            row["info"] = normalize_russian_text(row.get("info", ""))
-    data["partitura_translated"] = not translated
-    write_project_json(p_dir, data)
-    return {"status": "ok", "partitura": data.get("partitura", []), "translated": data["partitura_translated"]}
+    result = {}
+    def apply_translate(data: dict):
+        translated = bool(data.get("partitura_translated"))
+        for row in data.get("partitura", []):
+            original = row.get("_translation_original") or {}
+            if translated:
+                row["name"] = original.get("name", row.get("name", ""))
+                row["info"] = original.get("info", row.get("info", ""))
+                row.pop("_translation_original", None)
+            else:
+                row["_translation_original"] = {
+                    "name": row.get("name", ""),
+                    "info": row.get("info", ""),
+                }
+                row["name"] = normalize_russian_text(row.get("name", ""))
+                row["info"] = normalize_russian_text(row.get("info", ""))
+        data["partitura_translated"] = not translated
+        result["partitura"] = data.get("partitura", [])
+        result["translated"] = data["partitura_translated"]
+    mutate_project_data(p_dir, project_name, apply_translate)
+    return {"status": "ok", "partitura": result["partitura"], "translated": result["translated"]}
 
 @router.post("/{project_name}/upload_photo")
 async def upload_photo(request: Request, project_name: str, index: int = Form(...), photo: UploadFile = File(...)):
     ud = get_current_user(request)
     p_dir = project_dir_for(ud["id"], project_name)
-    data = load_project_data(p_dir, project_name)
-    row = data["rows"][index]
-    photo_dir = p_dir / "photos"
-    photo_dir.mkdir(exist_ok=True)
-    old = data["rows"][index].get("photo_path")
-    if old and os.path.exists(old):
-        os.remove(old)
-    p_path = unique_photo_path(p_dir, data["rows"], index)
-    with open(p_path, "wb") as b: shutil.copyfileobj(photo.file, b)
-    data["rows"][index]["photo_path"] = str(p_path)
-    write_project_json(p_dir, data)
-    return {"status": "ok", "photo_path": f"/projects/{project_name}/photos/{p_path.name}"}
+    result = {}
+    with project_lock(p_dir):
+        data = load_project_data_unlocked(p_dir, project_name)
+        photo_dir = p_dir / "photos"
+        photo_dir.mkdir(exist_ok=True)
+        old = data["rows"][index].get("photo_path")
+        if old and os.path.exists(old):
+            os.remove(old)
+        p_path = unique_photo_path(p_dir, data["rows"], index)
+        with open(p_path, "wb") as b:
+            shutil.copyfileobj(photo.file, b)
+        data["rows"][index]["photo_path"] = str(p_path)
+        write_project_json(p_dir, data)
+        result["photo_path"] = f"/projects/{project_name}/photos/{p_path.name}"
+    return {"status": "ok", "photo_path": result["photo_path"]}
 
 @router.get("/{project_name}/photos/{photo_name}")
 async def get_photo(request: Request, project_name: str, photo_name: str):
@@ -691,77 +738,80 @@ async def get_photo(request: Request, project_name: str, photo_name: str):
 async def update_desc(request: Request, project_name: str, index: int = Form(...), description: str = Form("")):
     ud = get_current_user(request)
     p_dir = project_dir_for(ud["id"], project_name)
-    data = load_project_data(p_dir, project_name)
-    data["rows"][index]["description"] = description
-    write_project_json(p_dir, data)
+    def apply_description(data: dict):
+        data["rows"][index]["description"] = description
+    mutate_project_data(p_dir, project_name, apply_description)
     return {"status": "ok"}
 
 @router.post("/{project_name}/add_row")
 async def add_row(request: Request, project_name: str, index: int = Form(...)):
     ud = get_current_user(request)
     p_dir = project_dir_for(ud["id"], project_name)
-    data = load_project_data(p_dir, project_name)
-    base = data["rows"][index]
-    new_row = {"preset_label": base["preset_label"], "fixture_id": base["fixture_id"], "preset_no": base["preset_no"], "photo_path": "", "description": ""}
-    data["rows"].insert(index + 1, new_row)
-    write_project_json(p_dir, data)
+    def apply_add(data: dict):
+        base = data["rows"][index]
+        new_row = {"preset_label": base["preset_label"], "fixture_id": base["fixture_id"], "preset_no": base["preset_no"], "photo_path": "", "description": ""}
+        data["rows"].insert(index + 1, new_row)
+    mutate_project_data(p_dir, project_name, apply_add)
     return {"status": "ok"}
 
 @router.post("/{project_name}/delete_row")
 async def delete_row(request: Request, project_name: str, index: int = Form(...)):
     ud = get_current_user(request)
     p_dir = project_dir_for(ud["id"], project_name)
-    data = load_project_data(p_dir, project_name)
-    if len(data["rows"]) > 1:
-        old = data["rows"][index].get("photo_path")
-        if old and os.path.exists(old): os.remove(old)
-        data["rows"].pop(index)
-        write_project_json(p_dir, data)
+    def apply_delete(data: dict):
+        if len(data["rows"]) > 1:
+            old = data["rows"][index].get("photo_path")
+            if old and os.path.exists(old):
+                os.remove(old)
+            data["rows"].pop(index)
+    mutate_project_data(p_dir, project_name, apply_delete)
     return {"status": "ok"}
 
 @router.post("/{project_name}/delete_photo")
 async def delete_photo(request: Request, project_name: str, index: int = Form(...)):
     ud = get_current_user(request)
     p_dir = project_dir_for(ud["id"], project_name)
-    data = load_project_data(p_dir, project_name)
-    old = data["rows"][index].get("photo_path")
-    if old and os.path.exists(old): os.remove(old)
-    data["rows"][index]["photo_path"] = ""
-    write_project_json(p_dir, data)
+    def apply_delete_photo(data: dict):
+        old = data["rows"][index].get("photo_path")
+        if old and os.path.exists(old):
+            os.remove(old)
+        data["rows"][index]["photo_path"] = ""
+    mutate_project_data(p_dir, project_name, apply_delete_photo)
     return {"status": "ok"}
 
 @router.get("/{project_name}/generate")
 async def generate_docs(request: Request, project_name: str, db: Session = Depends(database.get_db)):
     user = get_db_user(request, db)
     p_dir = project_dir_for(user.id, project_name)
-    data = load_project_data(p_dir, project_name)
-    base_name = data.get("title") or project_base_name(project_name)
-    
-    # 1. Regenerate Presets
-    rows = [PassportRow(r["preset_label"], r["fixture_id"], r["preset_no"], Path(r["photo_path"]) if r["photo_path"] else None, r["description"]) for r in data["rows"]]
-    create_passport_xlsx(rows, p_dir / f"{base_name}_пресеты.xlsx", base_name)
-    create_passport_pdf(rows, p_dir / f"{base_name}_пресеты.pdf", base_name)
-    
-    # 2. Regenerate Partitura (using user's custom fields if they exist)
-    xml_p = p_dir / data["xml_file"]
-    partitura_dicts = data.get("partitura", [])
-    part_rows = [partitura_row_from_dict(r, use_original=bool(data.get("partitura_translated"))) for r in partitura_dicts] or (parse_partitura(xml_p) if xml_p.exists() else [])
-    if part_rows:
-        if user.partitura_fields:
-            fields = [PartituraField(f["field_id"], f["title"], f["enabled"]) for f in json.loads(user.partitura_fields) if f["enabled"]]
-        else:
-            fields = [f for f in PARTITURA_DEFAULT_FIELDS if f.enabled]
-            
-        create_partitura_xlsx(part_rows, fields, p_dir / f"{base_name}_партитура.xlsx", base_name)
-        create_partitura_pdf(part_rows, fields, p_dir / f"{base_name}_партитура.pdf", base_name)
-        if data.get("partitura_translated") and partitura_dicts:
-            translated_rows = [partitura_row_from_dict(r) for r in partitura_dicts]
-            create_partitura_xlsx(translated_rows, fields, p_dir / f"{base_name}_партитура_рус.xlsx", f"{base_name} рус")
-            create_partitura_pdf(translated_rows, fields, p_dir / f"{base_name}_партитура_рус.pdf", f"{base_name} рус")
-        else:
-            for suffix in ("xlsx", "pdf"):
-                (p_dir / f"{base_name}_партитура_рус.{suffix}").unlink(missing_ok=True)
-    write_project_json(p_dir, data)
+    with project_lock(p_dir):
+        data = load_project_data_unlocked(p_dir, project_name)
+        base_name = data.get("title") or project_base_name(project_name)
+
+        # 1. Regenerate Presets
+        rows = [PassportRow(r["preset_label"], r["fixture_id"], r["preset_no"], Path(r["photo_path"]) if r["photo_path"] else None, r["description"]) for r in data["rows"]]
+        create_passport_xlsx(rows, p_dir / f"{base_name}_пресеты.xlsx", base_name)
+        create_passport_pdf(rows, p_dir / f"{base_name}_пресеты.pdf", base_name)
+
+        # 2. Regenerate Partitura (using user's custom fields if they exist)
+        xml_p = p_dir / data["xml_file"]
+        partitura_dicts = data.get("partitura", [])
+        part_rows = [partitura_row_from_dict(r, use_original=bool(data.get("partitura_translated"))) for r in partitura_dicts] or (parse_partitura(xml_p) if xml_p.exists() else [])
+        if part_rows:
+            if user.partitura_fields:
+                fields = [PartituraField(f["field_id"], f["title"], f["enabled"]) for f in json.loads(user.partitura_fields) if f["enabled"]]
+            else:
+                fields = [f for f in PARTITURA_DEFAULT_FIELDS if f.enabled]
+
+            create_partitura_xlsx(part_rows, fields, p_dir / f"{base_name}_партитура.xlsx", base_name)
+            create_partitura_pdf(part_rows, fields, p_dir / f"{base_name}_партитура.pdf", base_name)
+            if data.get("partitura_translated") and partitura_dicts:
+                translated_rows = [partitura_row_from_dict(r) for r in partitura_dicts]
+                create_partitura_xlsx(translated_rows, fields, p_dir / f"{base_name}_партитура_рус.xlsx", f"{base_name} рус")
+                create_partitura_pdf(translated_rows, fields, p_dir / f"{base_name}_партитура_рус.pdf", f"{base_name} рус")
+            else:
+                for suffix in ("xlsx", "pdf"):
+                    (p_dir / f"{base_name}_партитура_рус.{suffix}").unlink(missing_ok=True)
+        write_project_json(p_dir, data)
     if request.query_params.get("ajax") == "1":
         return {"status": "ok"}
 
@@ -771,13 +821,14 @@ async def generate_docs(request: Request, project_name: str, db: Session = Depen
 async def save_show_xml(request: Request, project_name: str):
     ud = get_current_user(request)
     p_dir = project_dir_for(ud["id"], project_name)
-    data = load_project_data(p_dir, project_name)
-    xml_path = p_dir / data["xml_file"]
-    if not xml_path.exists():
-        raise HTTPException(status_code=404, detail="XML not found")
-    base_name = data.get("title") or project_base_name(project_name)
-    output_path = p_dir / f"{safe_filename(base_name)}_new.xml"
-    save_partitura_to_show_xml(xml_path, data.get("partitura", []), output_path)
+    with project_lock(p_dir):
+        data = load_project_data_unlocked(p_dir, project_name)
+        xml_path = p_dir / data["xml_file"]
+        if not xml_path.exists():
+            raise HTTPException(status_code=404, detail="XML not found")
+        base_name = data.get("title") or project_base_name(project_name)
+        output_path = p_dir / f"{safe_filename(base_name)}_new.xml"
+        save_partitura_to_show_xml(xml_path, data.get("partitura", []), output_path)
     return {"status": "ok", "file": output_path.name}
 
 @router.get("/{project_name}/download/{file_name}")

@@ -406,6 +406,7 @@
     let capturedBlob = null;
     let descriptionSaveTimer = null;
     let descriptionSaveQueue = Promise.resolve();
+    let descriptionDirty = false;
 
     const tableBody = document.querySelector('#preset-table tbody');
     const cardList = document.getElementById('preset-card-list');
@@ -614,6 +615,7 @@
 
         document.getElementById('current-item-title').innerText = `${index + 1}/${projectData.rows.length}  Пресет: ${row.preset_label}  Прибор: ${row.fixture_id}`;
         descriptionInput.value = row.description || '';
+        descriptionDirty = false;
         capturedBlob = null;
         confirmBtn.classList.add('hidden');
         retakeBtn.classList.add('hidden');
@@ -649,9 +651,13 @@
     async function saveDescriptionNow() {
         if (!projectData.rows.length) return;
         clearTimeout(descriptionSaveTimer);
+        if (!descriptionDirty) return;
         const index = currentIndex;
         const val = descriptionInput.value;
-        if (projectData.rows[index]?.description === val) return;
+        if (projectData.rows[index]?.description === val) {
+            descriptionDirty = false;
+            return;
+        }
         projectData.rows[index].description = val;
         renderTable();
         descriptionSaveQueue = descriptionSaveQueue.then(async () => {
@@ -665,6 +671,9 @@
             if (!response.ok) {
                 throw new Error('Description save failed');
             }
+            if (currentIndex === index && descriptionInput.value === val) {
+                descriptionDirty = false;
+            }
         }).catch((error) => {
             console.error(error);
             alert('Описание не сохранилось. Проверь соединение и попробуй еще раз.');
@@ -673,6 +682,7 @@
     }
 
     descriptionInput.addEventListener('input', () => {
+        descriptionDirty = true;
         clearTimeout(descriptionSaveTimer);
         descriptionSaveTimer = setTimeout(saveDescriptionNow, 500);
     });

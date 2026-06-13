@@ -305,9 +305,9 @@ def load_project_data(project_dir: Path, project_name: str) -> dict:
                 json_counts[key] = occurrence + 1
                 table_row = table_by_occurrence.get((key, occurrence))
                 if table_row:
-                    if import_table_values or (table_row.description and not row.get("description")):
+                    if import_table_values or "description" not in row:
                         row["description"] = table_row.description
-                    if table_row.photo_path and (import_table_values or not row.get("photo_path")):
+                    if table_row.photo_path and (import_table_values or "photo_path" not in row):
                         row["photo_path"] = str(table_row.photo_path)
                     used_table_rows.add((key, occurrence))
 

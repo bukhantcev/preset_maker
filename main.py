@@ -51,7 +51,8 @@ PROJECT_ROOT = Path.home() / "Documents" / "MA2_passports"
 APP_DATA_DIR = Path.home() / ".passport_creator"
 REMOTE_CACHE_ROOT = APP_DATA_DIR / "remote_cache" / "MA2_passports"
 CONFIG_PATH = APP_DATA_DIR / "cloud_connection.json"
-WEB_ENV_PATH = Path(__file__).parent / "web_app" / ".env"
+SOURCE_ROOT = Path(__file__).resolve().parent
+WEB_ENV_PATH = SOURCE_ROOT / "web_app" / ".env"
 ACTIVE_PROJECT_ROOT = PROJECT_ROOT
 REMOTE_PROJECT_ROOT_NAME = "MA2_passports"
 YANDEX_APP_ROOT = f"app:/{REMOTE_PROJECT_ROOT_NAME}"
@@ -308,7 +309,44 @@ def find_existing_presets_xlsx(project_dir: Path) -> Optional[Path]:
     return legacy if legacy.exists() else None
 
 
-def load_dotenv_values(path: Path = WEB_ENV_PATH) -> dict[str, str]:
+def app_bundle_outer_dir() -> Optional[Path]:
+    if not getattr(sys, "frozen", False):
+        return None
+    current = Path(sys.executable).resolve()
+    for parent in current.parents:
+        if parent.suffix == ".app":
+            return parent.parent
+    return current.parent
+
+
+def dotenv_candidate_paths() -> list[Path]:
+    env_override = os.environ.get("PASSPORT_CREATOR_ENV", "").strip()
+    candidates = [
+        WEB_ENV_PATH,
+        Path.cwd() / ".env",
+        Path.cwd() / "web_app" / ".env",
+        PROJECT_ROOT / ".env",
+        APP_DATA_DIR / ".env",
+    ]
+    if env_override:
+        candidates.insert(0, Path(env_override).expanduser())
+    bundle_dir = app_bundle_outer_dir()
+    if bundle_dir is not None:
+        candidates.extend([bundle_dir / ".env", bundle_dir / "web_app" / ".env"])
+    seen: set[Path] = set()
+    result: list[Path] = []
+    for path in candidates:
+        if not str(path):
+            continue
+        resolved = path.expanduser()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        result.append(resolved)
+    return result
+
+
+def load_dotenv_values(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     try:
         for raw_line in path.read_text(encoding="utf-8").splitlines():
@@ -322,9 +360,23 @@ def load_dotenv_values(path: Path = WEB_ENV_PATH) -> dict[str, str]:
     return values
 
 
+def yandex_credentials_help() -> str:
+    paths = "\n".join(f"  {path}" for path in dotenv_candidate_paths())
+    return "Не найдены YANDEX_CLIENT_ID/YANDEX_CLIENT_SECRET. Положите их в .env:\n" + paths
+
+
 def yandex_oauth_credentials() -> tuple[str, str]:
-    env = load_dotenv_values()
-    return env.get("YANDEX_CLIENT_ID", ""), env.get("YANDEX_CLIENT_SECRET", "")
+    env_id = os.environ.get("YANDEX_CLIENT_ID", "").strip()
+    env_secret = os.environ.get("YANDEX_CLIENT_SECRET", "").strip()
+    if env_id and env_secret:
+        return env_id, env_secret
+    for path in dotenv_candidate_paths():
+        env = load_dotenv_values(path)
+        client_id = env.get("YANDEX_CLIENT_ID", "").strip()
+        client_secret = env.get("YANDEX_CLIENT_SECRET", "").strip()
+        if client_id and client_secret:
+            return client_id, client_secret
+    return "", ""
 
 
 def load_sftp_config() -> SftpConfig:
@@ -797,7 +849,7 @@ def yandex_rename_project(token: str, old_name: str, new_name: str) -> None:
 def yandex_exchange_code(code: str) -> YandexDiskConfig:
     client_id, client_secret = yandex_oauth_credentials()
     if not client_id or not client_secret:
-        raise RuntimeError(f"Не найдены YANDEX_CLIENT_ID/YANDEX_CLIENT_SECRET в {WEB_ENV_PATH}")
+        raise RuntimeError(yandex_credentials_help())
     data = urllib.parse.urlencode(
         {
             "grant_type": "authorization_code",
@@ -2121,7 +2173,7 @@ class PassportApp(tk.Tk):
     def open_yandex_oauth_url(self) -> None:
         client_id, client_secret = yandex_oauth_credentials()
         if not client_id or not client_secret:
-            messagebox.showerror(APP_TITLE, f"Не найдены YANDEX_CLIENT_ID/YANDEX_CLIENT_SECRET в {WEB_ENV_PATH}")
+            messagebox.showerror(APP_TITLE, yandex_credentials_help())
             return
         url = "https://oauth.yandex.ru/authorize?" + urllib.parse.urlencode(
             {
@@ -2137,7 +2189,7 @@ class PassportApp(tk.Tk):
     def connect_yandex_via_code(self, parent) -> YandexDiskConfig:
         client_id, client_secret = yandex_oauth_credentials()
         if not client_id or not client_secret:
-            raise RuntimeError(f"Не найдены YANDEX_CLIENT_ID/YANDEX_CLIENT_SECRET в {WEB_ENV_PATH}")
+            raise RuntimeError(yandex_credentials_help())
         scope = "cloud_api:disk.app_folder"
         url = "https://oauth.yandex.ru/authorize?" + urllib.parse.urlencode(
             {

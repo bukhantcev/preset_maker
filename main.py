@@ -6,6 +6,7 @@ import os
 import queue
 import re
 import shutil
+import ssl
 import stat
 import subprocess
 import sys
@@ -24,6 +25,7 @@ import json
 import xml.etree.ElementTree as ET
 
 try:
+    import certifi
     import cv2
     import paramiko
     from PIL import Image, ImageDraw, ImageFont, ImageTk
@@ -589,6 +591,14 @@ def mirror_project_to_remote_cache(project_dir: Path) -> None:
     shutil.copytree(project_dir, target)
 
 
+def https_context() -> ssl.SSLContext:
+    return ssl.create_default_context(cafile=certifi.where())
+
+
+def https_urlopen(request_or_url, *, timeout: int):
+    return urllib.request.urlopen(request_or_url, timeout=timeout, context=https_context())
+
+
 def yandex_request(
     method: str,
     endpoint: str,
@@ -608,7 +618,7 @@ def yandex_request(
         request_headers.update(headers)
     request = urllib.request.Request(url, data=data, headers=request_headers, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with https_urlopen(request, timeout=timeout) as response:
             return int(response.status), response.read()
     except urllib.error.HTTPError as exc:
         body = exc.read()
@@ -643,13 +653,13 @@ def yandex_download_url(token: str, disk_path: str) -> str:
 
 def yandex_put_bytes(url: str, content: bytes) -> None:
     request = urllib.request.Request(url, data=content, method="PUT")
-    with urllib.request.urlopen(request, timeout=120) as response:
+    with https_urlopen(request, timeout=120) as response:
         if int(response.status) not in {200, 201, 202}:
             raise RuntimeError(f"Загрузка файла вернула HTTP {response.status}")
 
 
 def yandex_get_bytes(url: str) -> bytes:
-    with urllib.request.urlopen(url, timeout=120) as response:
+    with https_urlopen(url, timeout=120) as response:
         return response.read()
 
 
@@ -766,14 +776,8 @@ def yandex_download_project_index(token: str, local_root: Path) -> None:
         shutil.rmtree(local_root)
     local_root.mkdir(parents=True, exist_ok=True)
     for project_name in yandex_project_names(token):
-        remote_project = yandex_project_path(project_name)
         local_project = local_root / project_name
         local_project.mkdir(parents=True, exist_ok=True)
-        for item in yandex_list_dir(token, remote_project):
-            if item.get("type") != "file":
-                continue
-            path = item.get("path") or f"{remote_project}/{item.get('name')}"
-            (local_project / item["name"]).write_bytes(yandex_get_bytes(yandex_download_url(token, path)))
 
 
 def yandex_delete_project(token: str, project_name: str) -> None:
@@ -805,7 +809,7 @@ def yandex_exchange_code(code: str) -> YandexDiskConfig:
     request = urllib.request.Request("https://oauth.yandex.ru/token", data=data, method="POST")
     request.add_header("Content-Type", "application/x-www-form-urlencoded")
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with https_urlopen(request, timeout=30) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "ignore")
@@ -1975,14 +1979,12 @@ class PassportApp(tk.Tk):
         window.configure(bg=BLACK)
         window.transient(self)
         window.grab_set()
-        window.columnconfigure(1, weight=1)
+        window.columnconfigure(0, weight=1)
 
         provider = tk.StringVar(value=self.cloud_provider.get())
-        tk.Label(window, text="Тип облака", bg=BLACK, fg=SILVER, font=("", 12, "bold")).grid(row=0, column=0, sticky="w", padx=18, pady=10)
-        provider_row = tk.Frame(window, bg=BLACK)
-        provider_row.grid(row=0, column=1, sticky="ew", padx=(0, 18), pady=10)
-        tk.Radiobutton(provider_row, text="SFTP", variable=provider, value="sftp", bg=BLACK, fg=SILVER, selectcolor=YELLOW, activebackground=BLACK, activeforeground=YELLOW).pack(side="left", padx=(0, 18))
-        tk.Radiobutton(provider_row, text="Яндекс.Диск", variable=provider, value="yandex_disk", bg=BLACK, fg=SILVER, selectcolor=YELLOW, activebackground=BLACK, activeforeground=YELLOW).pack(side="left")
+        tab_row = tk.Frame(window, bg=BLACK)
+        tab_row.grid(row=0, column=0, sticky="ew", padx=18, pady=(18, 10))
+        tab_row.columnconfigure((0, 1), weight=1)
 
         values = {
             "host": tk.StringVar(value=self.sftp_config.host),
@@ -1991,27 +1993,75 @@ class PassportApp(tk.Tk):
             "password": tk.StringVar(value=self.sftp_config.password),
             "remote_dir": tk.StringVar(value=self.sftp_config.remote_dir),
         }
-        labels = [
-            ("SFTP сервер", "host"),
-            ("Порт", "port"),
-            ("Пользователь", "username"),
-            ("Пароль", "password"),
-            ("Папка", "remote_dir"),
-        ]
-        for row, (label, key) in enumerate(labels, start=1):
-            tk.Label(window, text=label, bg=BLACK, fg=SILVER, font=("", 12, "bold")).grid(row=row, column=0, sticky="w", padx=18, pady=10)
-            entry = tk.Entry(window, textvariable=values[key], bg=PANEL, fg="white", insertbackground=YELLOW, relief="flat", show="*" if key == "password" else "")
-            entry.grid(row=row, column=1, sticky="ew", padx=(0, 18), pady=10, ipady=7)
+        yandex_code = tk.StringVar(value="")
+        body = tk.Frame(window, bg=BLACK)
+        body.grid(row=1, column=0, sticky="nsew", padx=18, pady=8)
+        body.columnconfigure(0, weight=1)
+
+        sftp_frame = tk.Frame(body, bg=BLACK)
+        sftp_frame.columnconfigure(1, weight=1)
+        yandex_frame = tk.Frame(body, bg=BLACK)
+        yandex_frame.columnconfigure(0, weight=1)
+
+        labels = [("SFTP сервер", "host"), ("Порт", "port"), ("Пользователь", "username"), ("Пароль", "password"), ("Папка", "remote_dir")]
+        for row, (label, key) in enumerate(labels):
+            tk.Label(sftp_frame, text=label, bg=BLACK, fg=SILVER, font=("", 12, "bold")).grid(row=row, column=0, sticky="w", pady=10)
+            entry = tk.Entry(sftp_frame, textvariable=values[key], bg=PANEL, fg="white", insertbackground=YELLOW, relief="flat", show="*" if key == "password" else "")
+            entry.grid(row=row, column=1, sticky="ew", padx=(14, 0), pady=10, ipady=7)
+
+        tk.Label(yandex_frame, text="1. Открой Яндекс, разреши доступ и скопируй код.", bg=BLACK, fg=SILVER, font=("", 12, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 10))
+        ttk.Button(yandex_frame, text="Открыть Яндекс", style="Yellow.TButton", command=lambda: self.open_yandex_oauth_url()).grid(row=1, column=0, sticky="ew", pady=(0, 14), ipady=8)
+        tk.Label(yandex_frame, text="2. Вставь код сюда.", bg=BLACK, fg=SILVER, font=("", 12, "bold")).grid(row=2, column=0, sticky="w", pady=(0, 8))
+        code_row = tk.Frame(yandex_frame, bg=BLACK)
+        code_row.grid(row=3, column=0, sticky="ew")
+        code_row.columnconfigure(0, weight=1)
+        code_entry = tk.Entry(code_row, textvariable=yandex_code, bg=PANEL, fg="white", insertbackground=YELLOW, relief="flat")
+        code_entry.grid(row=0, column=0, sticky="ew", ipady=8)
+
+        def paste_code() -> None:
+            try:
+                yandex_code.set(self.clipboard_get().strip())
+                code_entry.focus_set()
+                code_entry.icursor("end")
+            except tk.TclError:
+                pass
+
+        ttk.Button(code_row, text="Вставить", style="Silver.TButton", command=paste_code).grid(row=0, column=1, sticky="ew", padx=(10, 0), ipady=6)
 
         status = tk.StringVar(value="")
         status_label = tk.Label(window, textvariable=status, bg=BLACK, fg=SILVER)
-        status_label.grid(row=len(labels) + 1, column=0, columnspan=2, sticky="w", padx=18, pady=(6, 0))
+        status_label.grid(row=2, column=0, sticky="w", padx=18, pady=(6, 0))
+
+        def refresh_provider_view() -> None:
+            for child in body.winfo_children():
+                child.grid_remove()
+            if provider.get() == "sftp":
+                sftp_frame.grid(row=0, column=0, sticky="nsew")
+            else:
+                yandex_frame.grid(row=0, column=0, sticky="nsew")
+            sftp_tab.configure(style="Yellow.TButton" if provider.get() == "sftp" else "Silver.TButton")
+            yandex_tab.configure(style="Yellow.TButton" if provider.get() == "yandex_disk" else "Silver.TButton")
+
+        def choose_provider(value: str) -> None:
+            provider.set(value)
+            status.set("")
+            status_label.configure(fg=SILVER)
+            refresh_provider_view()
+
+        sftp_tab = ttk.Button(tab_row, text="SFTP", style="Yellow.TButton", command=lambda: choose_provider("sftp"))
+        yandex_tab = ttk.Button(tab_row, text="Яндекс.Диск", style="Silver.TButton", command=lambda: choose_provider("yandex_disk"))
+        sftp_tab.grid(row=0, column=0, sticky="ew", padx=(0, 8), ipady=8)
+        yandex_tab.grid(row=0, column=1, sticky="ew", padx=(8, 0), ipady=8)
+        refresh_provider_view()
 
         def save_and_connect() -> None:
             chosen = provider.get()
             if chosen == "yandex_disk":
                 try:
-                    config = self.connect_yandex_via_code(window)
+                    code = yandex_code.get().strip()
+                    if not code:
+                        raise RuntimeError("Код не введен.")
+                    config = yandex_exchange_code(code)
                 except Exception as exc:
                     status.set(f"Ошибка: {exc}")
                     status_label.configure(fg=RED)
@@ -2063,10 +2113,26 @@ class PassportApp(tk.Tk):
                 status_label.configure(fg=RED)
 
         buttons = tk.Frame(window, bg=BLACK)
-        buttons.grid(row=len(labels) + 2, column=0, columnspan=2, sticky="ew", padx=18, pady=18)
+        buttons.grid(row=3, column=0, sticky="ew", padx=18, pady=18)
         buttons.columnconfigure((0, 1), weight=1)
         ttk.Button(buttons, text="Назад", style="Silver.TButton", command=window.destroy).grid(row=0, column=0, sticky="ew", padx=(0, 8), ipady=6)
         ttk.Button(buttons, text="Подключить и сохранить", style="Yellow.TButton", command=save_and_connect).grid(row=0, column=1, sticky="ew", padx=(8, 0), ipady=6)
+
+    def open_yandex_oauth_url(self) -> None:
+        client_id, client_secret = yandex_oauth_credentials()
+        if not client_id or not client_secret:
+            messagebox.showerror(APP_TITLE, f"Не найдены YANDEX_CLIENT_ID/YANDEX_CLIENT_SECRET в {WEB_ENV_PATH}")
+            return
+        url = "https://oauth.yandex.ru/authorize?" + urllib.parse.urlencode(
+            {
+                "response_type": "code",
+                "client_id": client_id,
+                "redirect_uri": "https://oauth.yandex.ru/verification_code",
+                "scope": "cloud_api:disk.app_folder",
+                "force_confirm": "yes",
+            }
+        )
+        webbrowser.open(url)
 
     def connect_yandex_via_code(self, parent) -> YandexDiskConfig:
         client_id, client_secret = yandex_oauth_credentials()
@@ -2095,9 +2161,7 @@ class PassportApp(tk.Tk):
                 if not self.yandex_config.access_token:
                     return False, "Яндекс.Диск не подключен"
                 yandex_ensure_dir(self.yandex_config.access_token, YANDEX_APP_ROOT)
-                if REMOTE_CACHE_ROOT.exists():
-                    shutil.rmtree(REMOTE_CACHE_ROOT)
-                yandex_download_project_index(self.yandex_config.access_token, REMOTE_CACHE_ROOT)
+                REMOTE_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
                 self.remote_base_dir = YANDEX_APP_ROOT
                 self.remote_connected = True
                 return True, ""
@@ -2120,9 +2184,7 @@ class PassportApp(tk.Tk):
             session = ssh.open_sftp()
             base = config.remote_dir.strip("/") or REMOTE_PROJECT_ROOT_NAME
             ensure_sftp_dir(session, base)
-            if REMOTE_CACHE_ROOT.exists():
-                shutil.rmtree(REMOTE_CACHE_ROOT)
-            download_sftp_project_index(session, base, REMOTE_CACHE_ROOT)
+            REMOTE_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
         except Exception as exc:
             if ssh is not None:
                 try:

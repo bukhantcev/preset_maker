@@ -2210,31 +2210,73 @@ public class MainActivity extends ComponentActivity {
         LinearLayout form = new LinearLayout(this);
         form.setOrientation(LinearLayout.VERTICAL);
         form.setPadding(dp(18), dp(10), dp(18), 0);
-        Button yandexButton = new Button(this);
-        yandexButton.setText("Подключить Яндекс.Диск");
-        Button sftpLabel = new Button(this);
-        sftpLabel.setText("SFTP");
+        final String[] selectedProvider = {"yandex_disk".equals(cloudProvider) ? "yandex_disk" : "sftp"};
+
+        LinearLayout tabs = new LinearLayout(this);
+        tabs.setOrientation(LinearLayout.HORIZONTAL);
+        Button sftpTab = new Button(this);
+        sftpTab.setText("SFTP");
+        Button yandexTab = new Button(this);
+        yandexTab.setText("Яндекс.Диск");
+        tabs.addView(sftpTab, new LinearLayout.LayoutParams(0, -2, 1));
+        tabs.addView(yandexTab, new LinearLayout.LayoutParams(0, -2, 1));
+        form.addView(tabs);
+
+        LinearLayout sftpForm = new LinearLayout(this);
+        sftpForm.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout yandexForm = new LinearLayout(this);
+        yandexForm.setOrientation(LinearLayout.VERTICAL);
+
         EditText host = dialogInput("SFTP сервер", cloudUrl);
         EditText port = dialogInput("Порт", String.valueOf(cloudPort));
         EditText user = dialogInput("Пользователь", cloudUser);
         EditText password = dialogInput("Пароль", cloudPassword);
         EditText remoteDir = dialogInput("Папка", remoteBasePath == null || remoteBasePath.isEmpty() ? REMOTE_ROOT_NAME : remoteBasePath);
         password.setInputType(0x00000081);
-        form.addView(yandexButton);
-        form.addView(sftpLabel);
-        form.addView(host);
-        form.addView(port);
-        form.addView(user);
-        form.addView(password);
-        form.addView(remoteDir);
+        sftpForm.addView(host);
+        sftpForm.addView(port);
+        sftpForm.addView(user);
+        sftpForm.addView(password);
+        sftpForm.addView(remoteDir);
+
+        TextView yandexInfo = new TextView(this);
+        yandexInfo.setText("Открой Яндекс, скопируй код и вставь его в следующем окне.");
+        yandexInfo.setTextColor(BRAND_TEXT);
+        yandexInfo.setPadding(0, dp(14), 0, dp(14));
+        yandexForm.addView(yandexInfo, new LinearLayout.LayoutParams(-1, -2));
+
+        form.addView(sftpForm);
+        form.addView(yandexForm);
+
         AlertDialog dialog = new AlertDialog.Builder(this)
                 .setTitle("Настройка облака")
                 .setView(form)
                 .setNegativeButton("Назад", null)
                 .setPositiveButton("Подключить и сохранить", null)
                 .create();
-        yandexButton.setOnClickListener(v -> connectYandexDialog(dialog));
+
+        Runnable refreshTabs = () -> {
+            boolean yandex = "yandex_disk".equals(selectedProvider[0]);
+            sftpForm.setVisibility(yandex ? View.GONE : View.VISIBLE);
+            yandexForm.setVisibility(yandex ? View.VISIBLE : View.GONE);
+            sftpTab.setTextColor(yandex ? BRAND_TEXT : BRAND_YELLOW);
+            yandexTab.setTextColor(yandex ? BRAND_YELLOW : BRAND_TEXT);
+        };
+        sftpTab.setOnClickListener(v -> {
+            selectedProvider[0] = "sftp";
+            refreshTabs.run();
+        });
+        yandexTab.setOnClickListener(v -> {
+            selectedProvider[0] = "yandex_disk";
+            refreshTabs.run();
+        });
+        refreshTabs.run();
+
         dialog.setOnShowListener(d -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            if ("yandex_disk".equals(selectedProvider[0])) {
+                connectYandexDialog(dialog);
+                return;
+            }
             cloudProvider = "sftp";
             cloudUrl = host.getText().toString().trim();
             try {

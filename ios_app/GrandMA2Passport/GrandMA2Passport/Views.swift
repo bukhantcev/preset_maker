@@ -281,6 +281,7 @@ struct SftpSettingsView: View {
     @State private var password = ""
     @State private var remoteDir = RemoteSFTPService.rootName
     @State private var yandexCode = ""
+    @State private var selectedProvider = "sftp"
     @FocusState private var yandexCodeFocused: Bool
 
     var body: some View {
@@ -290,68 +291,81 @@ struct SftpSettingsView: View {
                     Text(store.remoteConnected ? "Облако подключено: \(store.cloudTitle())" : "Облако не подключено")
                         .font(.headline.bold())
                         .foregroundStyle(store.remoteConnected ? Color.green : Color.red)
-                    remoteField("SFTP сервер", text: $cloudURL)
-                        .keyboardType(.URL)
-                    remoteField("Порт", text: $port)
-                        .keyboardType(.numberPad)
-                    remoteField("Пользователь", text: $username)
-                    SecureField("Пароль", text: $password)
-                        .padding(12)
-                        .background(Brand.panel)
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Brand.yellow, lineWidth: 1))
-                    remoteField("Папка", text: $remoteDir)
-                    AppButton("Подключить и сохранить") {
-                        let parsedPort = Int(port.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 22
-                        let cleanDir = remoteDir.trimmingCharacters(in: .whitespacesAndNewlines)
-                        store.saveRemoteSettings(RemoteServerSettings(
-                            remoteMode: true,
-                            url: cloudURL.trimmingCharacters(in: .whitespacesAndNewlines),
-                            port: parsedPort,
-                            username: username.trimmingCharacters(in: .whitespacesAndNewlines),
-                            password: password,
-                            remoteDir: cleanDir.isEmpty ? RemoteSFTPService.rootName : cleanDir
-                        ))
-                        dismiss()
-                    }
-                    Divider().overlay(Brand.silverDark)
-                    Text("Яндекс.Диск")
-                        .font(.title3.bold())
-                        .foregroundStyle(Brand.yellow)
-                    AppButton("Открыть Яндекс") {
-                        do {
-                            UIApplication.shared.open(try RemoteSFTPService.yandexAuthorizeURL())
-                        } catch {
-                            store.errorText = error.localizedDescription
+
+                    HStack(spacing: 12) {
+                        cloudTab("SFTP", selected: selectedProvider == "sftp") {
+                            selectedProvider = "sftp"
+                        }
+                        cloudTab("Яндекс.Диск", selected: selectedProvider == "yandex_disk") {
+                            selectedProvider = "yandex_disk"
                         }
                     }
-                    HStack(spacing: 10) {
-                        TextField("Код Яндекса", text: $yandexCode)
-                            .textContentType(.oneTimeCode)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .keyboardType(.asciiCapable)
-                            .focused($yandexCodeFocused)
+
+                    if selectedProvider == "sftp" {
+                        remoteField("SFTP сервер", text: $cloudURL)
+                            .keyboardType(.URL)
+                        remoteField("Порт", text: $port)
+                            .keyboardType(.numberPad)
+                        remoteField("Пользователь", text: $username)
+                        SecureField("Пароль", text: $password)
                             .padding(12)
                             .background(Brand.panel)
                             .overlay(RoundedRectangle(cornerRadius: 8).stroke(Brand.yellow, lineWidth: 1))
-                        Button("Вставить") {
-                            if let value = UIPasteboard.general.string {
-                                yandexCode = value.trimmingCharacters(in: .whitespacesAndNewlines)
-                            }
-                            yandexCodeFocused = false
+                        remoteField("Папка", text: $remoteDir)
+                        AppButton("Подключить и сохранить") {
+                            let parsedPort = Int(port.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 22
+                            let cleanDir = remoteDir.trimmingCharacters(in: .whitespacesAndNewlines)
+                            store.saveRemoteSettings(RemoteServerSettings(
+                                remoteMode: true,
+                                url: cloudURL.trimmingCharacters(in: .whitespacesAndNewlines),
+                                port: parsedPort,
+                                username: username.trimmingCharacters(in: .whitespacesAndNewlines),
+                                password: password,
+                                remoteDir: cleanDir.isEmpty ? RemoteSFTPService.rootName : cleanDir
+                            ))
+                            dismiss()
                         }
-                        .font(.headline.bold())
-                        .foregroundStyle(Brand.yellow)
-                        .padding(.horizontal, 14)
-                        .frame(minHeight: 48)
-                        .background(Brand.black)
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Brand.yellow, lineWidth: 2))
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                    }
-                    AppButton("Подключить Яндекс.Диск") {
-                        yandexCodeFocused = false
-                        store.connectYandexDisk(code: yandexCode)
-                        dismiss()
+                    } else {
+                        Text("Открой Яндекс, скопируй код и вставь его ниже.")
+                            .font(.headline.bold())
+                            .foregroundStyle(Brand.silver)
+                            .padding(.top, 6)
+                        AppButton("Открыть Яндекс") {
+                            do {
+                                UIApplication.shared.open(try RemoteSFTPService.yandexAuthorizeURL())
+                            } catch {
+                                store.errorText = error.localizedDescription
+                            }
+                        }
+                        HStack(spacing: 10) {
+                            TextField("Код Яндекса", text: $yandexCode)
+                                .textContentType(.oneTimeCode)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                                .keyboardType(.asciiCapable)
+                                .focused($yandexCodeFocused)
+                                .padding(12)
+                                .background(Brand.panel)
+                                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Brand.yellow, lineWidth: 1))
+                            Button("Вставить") {
+                                if let value = UIPasteboard.general.string {
+                                    yandexCode = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                                }
+                                yandexCodeFocused = false
+                            }
+                            .font(.headline.bold())
+                            .foregroundStyle(Brand.yellow)
+                            .padding(.horizontal, 14)
+                            .frame(minHeight: 48)
+                            .background(Brand.black)
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Brand.yellow, lineWidth: 2))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                        }
+                        AppButton("Подключить Яндекс.Диск") {
+                            yandexCodeFocused = false
+                            store.connectYandexDisk(code: yandexCode)
+                            dismiss()
+                        }
                     }
                 }
                 .padding(24)
@@ -377,8 +391,22 @@ struct SftpSettingsView: View {
                 username = store.remoteSettings.username
                 password = store.remoteSettings.password
                 remoteDir = store.remoteSettings.remoteDir.isEmpty ? RemoteSFTPService.rootName : store.remoteSettings.remoteDir
+                selectedProvider = store.remoteSettings.provider == "yandex_disk" ? "yandex_disk" : "sftp"
             }
         }
+    }
+
+    private func cloudTab(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.headline.bold())
+                .frame(maxWidth: .infinity)
+                .frame(minHeight: 48)
+        }
+        .foregroundStyle(selected ? Brand.yellow : Brand.silver)
+        .background(Brand.black)
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(selected ? Brand.yellow : Brand.silverDark, lineWidth: 2))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
     private func remoteField(_ title: String, text: Binding<String>) -> some View {

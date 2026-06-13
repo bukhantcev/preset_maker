@@ -405,6 +405,7 @@
     let stream = null;
     let capturedBlob = null;
     let descriptionSaveTimer = null;
+    let descriptionSaveQueue = Promise.resolve();
 
     const tableBody = document.querySelector('#preset-table tbody');
     const cardList = document.getElementById('preset-card-list');
@@ -605,9 +606,9 @@
         document.getElementById('row-count-text').innerText = `Строк: ${projectData.rows.length}`;
     }
 
-    function selectRow(index) {
+    async function selectRow(index) {
         if (index < 0 || index >= projectData.rows.length) return;
-        saveDescriptionNow();
+        await saveDescriptionNow();
         currentIndex = index;
         const row = projectData.rows[index];
 
@@ -647,17 +648,28 @@
 
     async function saveDescriptionNow() {
         if (!projectData.rows.length) return;
+        clearTimeout(descriptionSaveTimer);
+        const index = currentIndex;
         const val = descriptionInput.value;
-        if (projectData.rows[currentIndex]?.description === val) return;
-        projectData.rows[currentIndex].description = val;
+        if (projectData.rows[index]?.description === val) return;
+        projectData.rows[index].description = val;
         renderTable();
-        const formData = new FormData();
-        formData.append('index', currentIndex);
-        formData.append('description', val);
-        await fetch(`/projects/${encodeURIComponent(projectName)}/update_description`, {
-            method: 'POST',
-            body: formData
+        descriptionSaveQueue = descriptionSaveQueue.then(async () => {
+            const formData = new FormData();
+            formData.append('index', index);
+            formData.append('description', val);
+            const response = await fetch(`/projects/${encodeURIComponent(projectName)}/update_description`, {
+                method: 'POST',
+                body: formData
+            });
+            if (!response.ok) {
+                throw new Error('Description save failed');
+            }
+        }).catch((error) => {
+            console.error(error);
+            alert('Описание не сохранилось. Проверь соединение и попробуй еще раз.');
         });
+        await descriptionSaveQueue;
     }
 
     descriptionInput.addEventListener('input', () => {

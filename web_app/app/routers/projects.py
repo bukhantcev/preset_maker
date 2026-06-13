@@ -280,7 +280,11 @@ def load_project_data(project_dir: Path, project_name: str) -> dict:
             data["xml_file"] = xml_path.name
             items = parse_grandma2_presets(xml_path)
             item_by_group = {(item.preset_label, item.fixture_id): item for item in items}
-            has_table = any(project_dir.glob("*_пресеты.xlsx"))
+            table_files = list(project_dir.glob("*_пресеты.xlsx"))
+            table_mtime = max((p.stat().st_mtime for p in table_files), default=0)
+            json_mtime = json_path.stat().st_mtime
+            import_table_values = table_mtime > json_mtime
+            has_table = bool(table_files)
             table_rows, _ = load_passport_rows(items, project_dir, data["title"]) if has_table else ([], None)
             table_counts = {}
             table_by_occurrence = {}
@@ -301,8 +305,9 @@ def load_project_data(project_dir: Path, project_name: str) -> dict:
                 json_counts[key] = occurrence + 1
                 table_row = table_by_occurrence.get((key, occurrence))
                 if table_row:
-                    row["description"] = table_row.description
-                    if table_row.photo_path:
+                    if import_table_values or (table_row.description and not row.get("description")):
+                        row["description"] = table_row.description
+                    if table_row.photo_path and (import_table_values or not row.get("photo_path")):
                         row["photo_path"] = str(table_row.photo_path)
                     used_table_rows.add((key, occurrence))
 

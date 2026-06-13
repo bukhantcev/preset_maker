@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from pathlib import Path
 import shutil
 from .. import database, models
+from ..config import settings
 
 router = APIRouter()
 templates = Jinja2Templates(directory="app/templates")
@@ -40,7 +41,7 @@ def get_dir_size(path: Path) -> int:
 async def admin_dashboard(request: Request, msg: str = None, admin_user: models.User = Depends(get_admin_user), db: Session = Depends(database.get_db)):
     users = db.query(models.User).all()
     
-    base_dir = Path("/tmp/passport_creator/users")
+    base_dir = Path(settings.BASE_TEMP_DIR)
     stats = []
     
     for u in users:
@@ -70,7 +71,7 @@ async def admin_dashboard(request: Request, msg: str = None, admin_user: models.
 
 @router.post("/user/{user_id}/clear_projects")
 async def clear_user_projects(user_id: int, request: Request, admin_user: models.User = Depends(get_admin_user)):
-    user_dir = Path(f"/tmp/passport_creator/users/{user_id}/projects")
+    user_dir = Path(settings.BASE_TEMP_DIR) / str(user_id) / "projects"
     if user_dir.exists():
         shutil.rmtree(user_dir)
     return RedirectResponse(url="/admin", status_code=303)
@@ -97,7 +98,7 @@ async def delete_user(user_id: int, request: Request, admin_user: models.User = 
     if not user_to_delete:
         raise HTTPException(status_code=404, detail="User not found")
         
-    user_dir = Path(f"/tmp/passport_creator/users/{user_id}")
+    user_dir = Path(settings.BASE_TEMP_DIR) / str(user_id)
     if user_dir.exists():
         shutil.rmtree(user_dir)
         

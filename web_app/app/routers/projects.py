@@ -10,6 +10,7 @@ import paramiko
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from .. import database, models
+from ..config import settings
 from ..core_logic import (
     parse_grandma2_presets, load_passport_rows, PassportRow, 
     create_passport_xlsx, create_passport_pdf, safe_filename, 
@@ -35,7 +36,7 @@ def get_db_user(request: Request, db: Session):
     return db.query(models.User).filter(models.User.id == ud["id"]).first()
 
 def user_temp_dir(user_id: int):
-    path = Path(f"/tmp/passport_creator/users/{user_id}/projects")
+    path = Path(settings.BASE_TEMP_DIR) / str(user_id) / "projects"
     path.mkdir(parents=True, exist_ok=True)
     return path
 

@@ -6,12 +6,32 @@ android {
     namespace "com.buha.grandma2passport"
     compileSdk 34
 
+    buildFeatures {
+        buildConfig true
+    }
+
+    def rootEnv = new File(rootProject.projectDir.parentFile, "web_app/.env")
+    def envValues = [:]
+    if (rootEnv.exists()) {
+        rootEnv.eachLine { line ->
+            def trimmed = line.trim()
+            if (trimmed && !trimmed.startsWith("#") && trimmed.contains("=")) {
+                def idx = trimmed.indexOf("=")
+                def key = trimmed.substring(0, idx).trim()
+                def value = trimmed.substring(idx + 1).trim().replaceAll(/^['"]|['"]$/, "")
+                envValues[key] = value
+            }
+        }
+    }
+
     defaultConfig {
         applicationId "com.buha.grandma2passport"
         minSdk 24
         targetSdk 34
         versionCode 1
         versionName "0.1"
+        buildConfigField "String", "YANDEX_CLIENT_ID", "\"${(envValues["YANDEX_CLIENT_ID"] ?: "").replace("\\", "\\\\").replace("\"", "\\\"")}\""
+        buildConfigField "String", "YANDEX_CLIENT_SECRET", "\"${(envValues["YANDEX_CLIENT_SECRET"] ?: "").replace("\\", "\\\\").replace("\"", "\\\"")}\""
     }
 }
 

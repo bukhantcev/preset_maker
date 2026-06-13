@@ -107,7 +107,7 @@
 				700000000000000000000010 /* SwiftSFTP */,
 			);
 			productName = "GrandMA2 Passport";
-			productReference = 200000000000000000000011 /* GrandMA2 Passport.app */;
+			productReference = 200000000000000000000011 /* Passport creator.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -177,25 +177,6 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
-
-/* Begin XCRemoteSwiftPackageReference section */
-		700000000000000000000011 /* XCRemoteSwiftPackageReference "SwiftSFTP" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/RuiNelson/SwiftSFTP.git";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 1.0.0;
-			};
-		};
-/* End XCRemoteSwiftPackageReference section */
-
-/* Begin XCSwiftPackageProductDependency section */
-		700000000000000000000010 /* SwiftSFTP */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 700000000000000000000011 /* XCRemoteSwiftPackageReference "SwiftSFTP" */;
-			productName = SwiftSFTP;
-		};
-/* End XCSwiftPackageProductDependency section */
 
 /* Begin XCBuildConfiguration section */
 		800000000000000000000001 /* Debug */ = {
@@ -302,10 +283,10 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = GrandMA2Passport/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
-				CURRENT_PROJECT_VERSION = 1;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.buha.grandma2passport;
 				PRODUCT_NAME = "Passport creator";
@@ -315,6 +296,8 @@
 				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 1;
+				YANDEX_CLIENT_ID = 21be1e207ebd47518c1e4b5300e341aa;
+				YANDEX_CLIENT_SECRET = 5b286a28ac6d4a01bbe99a5501726002;
 			};
 			name = Debug;
 		};
@@ -323,10 +306,10 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = GrandMA2Passport/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
-				CURRENT_PROJECT_VERSION = 1;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.buha.grandma2passport;
 				PRODUCT_NAME = "Passport creator";
@@ -336,6 +319,8 @@
 				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 1;
+				YANDEX_CLIENT_ID = 21be1e207ebd47518c1e4b5300e341aa;
+				YANDEX_CLIENT_SECRET = 5b286a28ac6d4a01bbe99a5501726002;
 			};
 			name = Release;
 		};
@@ -361,6 +346,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		700000000000000000000011 /* XCRemoteSwiftPackageReference "SwiftSFTP" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/RuiNelson/SwiftSFTP.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.0.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		700000000000000000000010 /* SwiftSFTP */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 700000000000000000000011 /* XCRemoteSwiftPackageReference "SwiftSFTP" */;
+			productName = SwiftSFTP;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 700000000000000000000001 /* Project object */;
 }

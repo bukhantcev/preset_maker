@@ -12,6 +12,10 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
@@ -40,14 +44,15 @@ except ImportError as exc:
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-
 APP_TITLE = "Passport creator"
 PROJECT_ROOT = Path.home() / "Documents" / "MA2_passports"
 APP_DATA_DIR = Path.home() / ".passport_creator"
 REMOTE_CACHE_ROOT = APP_DATA_DIR / "remote_cache" / "MA2_passports"
 CONFIG_PATH = APP_DATA_DIR / "cloud_connection.json"
+WEB_ENV_PATH = Path(__file__).parent / "web_app" / ".env"
 ACTIVE_PROJECT_ROOT = PROJECT_ROOT
 REMOTE_PROJECT_ROOT_NAME = "MA2_passports"
+YANDEX_APP_ROOT = f"app:/{REMOTE_PROJECT_ROOT_NAME}"
 PHOTO_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".heic", ".heif"}
 XML_EXTENSIONS = {".xml"}
 
@@ -93,7 +98,7 @@ class PassportRow:
         return safe_filename(f"{self.preset_no}_{self.fixture_id}")
 
 
-@dataclass(frozen=True)
+@dataclass
 class PartituraRow:
     number: str
     name: str
@@ -104,6 +109,9 @@ class PartituraRow:
     trigger_time: str
     info: str
     command: str
+    xml_key: str = ""
+    original_name: str = ""
+    original_info: str = ""
 
     def value(self, field_id: str) -> str:
         return {
@@ -135,11 +143,18 @@ class Project:
 
 @dataclass
 class SftpConfig:
+    provider: str = "sftp"
     host: str = ""
     port: int = 22
     username: str = ""
     password: str = ""
     remote_dir: str = REMOTE_PROJECT_ROOT_NAME
+
+
+@dataclass
+class YandexDiskConfig:
+    access_token: str = ""
+    refresh_token: str = ""
 
 
 @dataclass(frozen=True)
@@ -269,6 +284,14 @@ def partitura_pdf_path(project_dir: Path, title: str) -> Path:
     return project_dir / f"{safe_filename(title)}_партитура.pdf"
 
 
+def partitura_new_xml_path(project_dir: Path, title: str) -> Path:
+    return project_dir / f"{safe_filename(title)}_new.xml"
+
+
+def partitura_state_path(project_dir: Path) -> Path:
+    return project_dir / "partitura_state.json"
+
+
 def photos_dir(project_dir: Path) -> Path:
     path = project_dir / "photos"
     path.mkdir(parents=True, exist_ok=True)
@@ -281,6 +304,25 @@ def find_existing_presets_xlsx(project_dir: Path) -> Optional[Path]:
         return candidates[0]
     legacy = project_dir / "passport.xlsx"
     return legacy if legacy.exists() else None
+
+
+def load_dotenv_values(path: Path = WEB_ENV_PATH) -> dict[str, str]:
+    values: dict[str, str] = {}
+    try:
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            values[key.strip()] = value.strip().strip("\"'")
+    except OSError:
+        pass
+    return values
+
+
+def yandex_oauth_credentials() -> tuple[str, str]:
+    env = load_dotenv_values()
+    return env.get("YANDEX_CLIENT_ID", ""), env.get("YANDEX_CLIENT_SECRET", "")
 
 
 def load_sftp_config() -> SftpConfig:
@@ -296,6 +338,7 @@ def load_sftp_config() -> SftpConfig:
     except (TypeError, ValueError):
         port = 22
     return SftpConfig(
+        provider=str(data.get("provider", "sftp")),
         host=raw_host,
         port=port,
         username=str(data.get("username", "")),
@@ -305,15 +348,33 @@ def load_sftp_config() -> SftpConfig:
 
 
 def save_sftp_config(config: SftpConfig) -> None:
+    save_cloud_config(config, load_yandex_config())
+
+
+def load_yandex_config() -> YandexDiskConfig:
+    try:
+        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return YandexDiskConfig()
+    return YandexDiskConfig(
+        access_token=str(data.get("yandex_access_token", "")),
+        refresh_token=str(data.get("yandex_refresh_token", "")),
+    )
+
+
+def save_cloud_config(sftp: SftpConfig, yandex: YandexDiskConfig) -> None:
     APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
     CONFIG_PATH.write_text(
         json.dumps(
             {
-                "host": config.host,
-                "port": config.port,
-                "username": config.username,
-                "password": config.password,
-                "remote_dir": config.remote_dir,
+                "provider": sftp.provider,
+                "host": sftp.host,
+                "port": sftp.port,
+                "username": sftp.username,
+                "password": sftp.password,
+                "remote_dir": sftp.remote_dir,
+                "yandex_access_token": yandex.access_token,
+                "yandex_refresh_token": yandex.refresh_token,
             },
             ensure_ascii=False,
             indent=2,
@@ -528,6 +589,233 @@ def mirror_project_to_remote_cache(project_dir: Path) -> None:
     shutil.copytree(project_dir, target)
 
 
+def yandex_request(
+    method: str,
+    endpoint: str,
+    token: str,
+    *,
+    params: Optional[dict[str, str]] = None,
+    data: bytes | None = None,
+    headers: Optional[dict[str, str]] = None,
+    timeout: int = 60,
+) -> tuple[int, bytes]:
+    query = urllib.parse.urlencode(params or {})
+    url = f"https://cloud-api.yandex.net/v1/disk/{endpoint}"
+    if query:
+        url = f"{url}?{query}"
+    request_headers = {"Authorization": f"OAuth {token}"}
+    if headers:
+        request_headers.update(headers)
+    request = urllib.request.Request(url, data=data, headers=request_headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return int(response.status), response.read()
+    except urllib.error.HTTPError as exc:
+        body = exc.read()
+        return int(exc.code), body
+
+
+def yandex_json(method: str, endpoint: str, token: str, *, params: Optional[dict[str, str]] = None, timeout: int = 60) -> dict:
+    status, body = yandex_request(method, endpoint, token, params=params, timeout=timeout)
+    if status not in {200, 201, 202, 204, 409}:
+        detail = body.decode("utf-8", "ignore")[:500]
+        raise RuntimeError(f"Яндекс.Диск HTTP {status}: {detail}")
+    if not body:
+        return {}
+    return json.loads(body.decode("utf-8"))
+
+
+def yandex_upload_url(token: str, disk_path: str) -> str:
+    payload = yandex_json("GET", "resources/upload", token, params={"path": disk_path, "overwrite": "true"})
+    href = payload.get("href")
+    if not href:
+        raise RuntimeError("Яндекс.Диск не вернул ссылку загрузки.")
+    return href
+
+
+def yandex_download_url(token: str, disk_path: str) -> str:
+    payload = yandex_json("GET", "resources/download", token, params={"path": disk_path})
+    href = payload.get("href")
+    if not href:
+        raise RuntimeError("Яндекс.Диск не вернул ссылку скачивания.")
+    return href
+
+
+def yandex_put_bytes(url: str, content: bytes) -> None:
+    request = urllib.request.Request(url, data=content, method="PUT")
+    with urllib.request.urlopen(request, timeout=120) as response:
+        if int(response.status) not in {200, 201, 202}:
+            raise RuntimeError(f"Загрузка файла вернула HTTP {response.status}")
+
+
+def yandex_get_bytes(url: str) -> bytes:
+    with urllib.request.urlopen(url, timeout=120) as response:
+        return response.read()
+
+
+def yandex_ensure_dir(token: str, disk_path: str) -> None:
+    current = "app:"
+    for part in [piece for piece in disk_path.removeprefix("app:/").split("/") if piece]:
+        current = f"{current}/{part}"
+        status, body = yandex_request("PUT", "resources", token, params={"path": current}, timeout=30)
+        if status not in {201, 409}:
+            detail = body.decode("utf-8", "ignore")[:500]
+            raise RuntimeError(f"Не удалось создать папку {current}: HTTP {status} {detail}")
+
+
+def yandex_project_path(project_name: str) -> str:
+    return f"{YANDEX_APP_ROOT}/{project_name}"
+
+
+def yandex_relative_path(root: Path, file: Path) -> str:
+    return root.relative_to(root) if False else str(file.relative_to(root)).replace("\\", "/")
+
+
+def yandex_upload_project(
+    token: str,
+    local_project: Path,
+    progress: Optional[Callable[[int, int, str], None]] = None,
+) -> None:
+    require_project_xml(local_project)
+    remote_project = yandex_project_path(local_project.name)
+    yandex_ensure_dir(token, remote_project)
+    files = local_project_files(local_project)
+    total = len(files)
+    for index, file in enumerate(files, start=1):
+        relative = str(file.relative_to(local_project)).replace("\\", "/")
+        if progress:
+            progress(index, total, relative)
+        parent = f"{remote_project}/{relative.rsplit('/', 1)[0]}" if "/" in relative else remote_project
+        yandex_ensure_dir(token, parent)
+        href = yandex_upload_url(token, f"{remote_project}/{relative}")
+        yandex_put_bytes(href, file.read_bytes())
+    mirror_project_to_remote_cache(local_project)
+
+
+def yandex_list_dir(token: str, disk_path: str, limit: int = 1000) -> list[dict]:
+    payload = yandex_json("GET", "resources", token, params={"path": disk_path, "limit": str(limit)}, timeout=60)
+    return payload.get("_embedded", {}).get("items", [])
+
+
+def yandex_project_names(token: str) -> list[str]:
+    yandex_ensure_dir(token, YANDEX_APP_ROOT)
+    names = []
+    for item in yandex_list_dir(token, YANDEX_APP_ROOT):
+        if item.get("type") != "dir":
+            continue
+        try:
+            entries = yandex_list_dir(token, item.get("path") or yandex_project_path(item["name"]))
+        except Exception:
+            continue
+        if any(entry.get("type") == "file" and str(entry.get("name", "")).lower().endswith(".xml") for entry in entries):
+            names.append(item.get("name", ""))
+    return sorted([name for name in names if name], key=str.lower)
+
+
+def yandex_collect_files(token: str, disk_path: str, relative: Path = Path()) -> list[RemoteFile]:
+    files: list[RemoteFile] = []
+    for item in yandex_list_dir(token, disk_path):
+        item_name = item.get("name", "")
+        item_path = item.get("path") or f"{disk_path}/{item_name}"
+        item_relative = relative / item_name
+        if item.get("type") == "dir":
+            files.extend(yandex_collect_files(token, item_path, item_relative))
+        elif item.get("type") == "file":
+            files.append(RemoteFile(item_path, item_relative, int(item.get("size") or 0)))
+    return files
+
+
+def yandex_download_project_atomic(
+    token: str,
+    project_name: str,
+    local_project: Path,
+    progress: Optional[Callable[[int, int, str], None]] = None,
+) -> None:
+    remote_project = yandex_project_path(project_name)
+    files = yandex_collect_files(token, remote_project)
+    temp_dir = local_project.parent / f".{local_project.name}.download"
+    backup_dir = local_project.parent / f".{local_project.name}.old"
+    if temp_dir.exists():
+        shutil.rmtree(temp_dir)
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        total = len(files)
+        for index, remote_file in enumerate(files, start=1):
+            if progress:
+                progress(index, total, str(remote_file.relative_path))
+            target = temp_dir / remote_file.relative_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(yandex_get_bytes(yandex_download_url(token, remote_file.remote_path)))
+        if not project_xml_path(temp_dir):
+            raise RuntimeError("В скачанном проекте нет XML.")
+        if backup_dir.exists():
+            shutil.rmtree(backup_dir)
+        if local_project.exists():
+            local_project.replace(backup_dir)
+        temp_dir.replace(local_project)
+        if backup_dir.exists():
+            shutil.rmtree(backup_dir)
+    except Exception:
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir)
+        raise
+
+
+def yandex_download_project_index(token: str, local_root: Path) -> None:
+    if local_root.exists():
+        shutil.rmtree(local_root)
+    local_root.mkdir(parents=True, exist_ok=True)
+    for project_name in yandex_project_names(token):
+        remote_project = yandex_project_path(project_name)
+        local_project = local_root / project_name
+        local_project.mkdir(parents=True, exist_ok=True)
+        for item in yandex_list_dir(token, remote_project):
+            if item.get("type") != "file":
+                continue
+            path = item.get("path") or f"{remote_project}/{item.get('name')}"
+            (local_project / item["name"]).write_bytes(yandex_get_bytes(yandex_download_url(token, path)))
+
+
+def yandex_delete_project(token: str, project_name: str) -> None:
+    status, body = yandex_request("DELETE", "resources", token, params={"path": yandex_project_path(project_name), "permanently": "true"}, timeout=60)
+    if status not in {202, 204, 404}:
+        raise RuntimeError(body.decode("utf-8", "ignore")[:500])
+
+
+def yandex_rename_project(token: str, old_name: str, new_name: str) -> None:
+    old_path = yandex_project_path(old_name)
+    new_path = yandex_project_path(new_name)
+    status, body = yandex_request("POST", "resources/move", token, params={"from": old_path, "path": new_path, "overwrite": "true"}, timeout=60)
+    if status not in {201, 202}:
+        raise RuntimeError(body.decode("utf-8", "ignore")[:500])
+
+
+def yandex_exchange_code(code: str) -> YandexDiskConfig:
+    client_id, client_secret = yandex_oauth_credentials()
+    if not client_id or not client_secret:
+        raise RuntimeError(f"Не найдены YANDEX_CLIENT_ID/YANDEX_CLIENT_SECRET в {WEB_ENV_PATH}")
+    data = urllib.parse.urlencode(
+        {
+            "grant_type": "authorization_code",
+            "code": code.strip(),
+            "client_id": client_id,
+            "client_secret": client_secret,
+        }
+    ).encode("utf-8")
+    request = urllib.request.Request("https://oauth.yandex.ru/token", data=data, method="POST")
+    request.add_header("Content-Type", "application/x-www-form-urlencoded")
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "ignore")
+        raise RuntimeError(f"OAuth HTTP {exc.code}: {detail}")
+    access = payload.get("access_token", "")
+    if not access:
+        raise RuntimeError("Yandex не вернул access_token.")
+    return YandexDiskConfig(access, payload.get("refresh_token", ""))
+
+
 def parse_grandma2_presets(xml_path: Path) -> list[PresetItem]:
     tree = ET.parse(xml_path)
     root = tree.getroot()
@@ -576,10 +864,55 @@ def format_cue_number(number: str, sub_number: str) -> str:
         return f"{number}.{sub_number}"
 
 
+def split_cue_number(value: str) -> tuple[str, str]:
+    text = str(value or "").strip()
+    if not text:
+        return "0", "0"
+    if "." not in text:
+        return text, "0"
+    number, sub = text.split(".", 1)
+    sub = re.sub(r"\D", "", sub)
+    if not sub:
+        return number or "0", "0"
+    return number or "0", str(int(sub) * 100)
+
+
+def cue_xml_key(cue_number: str, order: int) -> str:
+    return f"{cue_number}#{order}"
+
+
+def first_index_zero_cue_part(cue: ET.Element) -> Optional[ET.Element]:
+    for cue_part in cue.iter():
+        if local_name(cue_part.tag) == "CuePart" and (cue_part.get("index") or "0") == "0":
+            return cue_part
+    return None
+
+
+def iter_partitura_cues(root: ET.Element) -> list[tuple[ET.Element, str]]:
+    cues: list[tuple[ET.Element, str]] = []
+    order = 0
+    for cue in root.iter():
+        if local_name(cue.tag) != "Cue":
+            continue
+        number_node = child_by_name(cue, "Number")
+        if number_node is None or first_index_zero_cue_part(cue) is None:
+            continue
+        cue_number = format_cue_number(number_node.get("number", ""), number_node.get("sub_number", "0"))
+        cues.append((cue, cue_xml_key(cue_number, order)))
+        order += 1
+    return cues
+
+
+def partitura_xml_keys(xml_path: Path) -> list[str]:
+    tree = ET.parse(xml_path)
+    return [key for _cue, key in iter_partitura_cues(tree.getroot())]
+
+
 def parse_partitura(xml_path: Path) -> list[PartituraRow]:
     tree = ET.parse(xml_path)
     root = tree.getroot()
     rows: list[PartituraRow] = []
+    order = 0
 
     for cue in root.iter():
         if local_name(cue.tag) != "Cue":
@@ -646,9 +979,203 @@ def parse_partitura(xml_path: Path) -> list[PartituraRow]:
                     trigger_time=trigger_time,
                     info=part_info or cue_info,
                     command=part_command or cue_command,
+                    xml_key=cue_xml_key(cue_number, order),
                 )
             )
+            order += 1
     return rows
+
+
+def qname(root: ET.Element, name: str) -> str:
+    if root.tag.startswith("{"):
+        namespace = root.tag.split("}", 1)[0][1:]
+        return f"{{{namespace}}}{name}"
+    return name
+
+
+def find_cue_parent(root: ET.Element) -> ET.Element:
+    for parent in root.iter():
+        if any(local_name(child.tag) == "Cue" for child in parent):
+            return parent
+    return root
+
+
+def create_empty_cue(root: ET.Element, template_cue: Optional[ET.Element]) -> ET.Element:
+    cue = ET.Element(qname(root, "Cue"))
+    cue.append(ET.Element(qname(root, "Number"), {"number": "0", "sub_number": "0"}))
+    cue.append(ET.Element(qname(root, "CueDatas")))
+    cue_part = ET.Element(qname(root, "CuePart"), {"index": "0", "name": "cue", "basic_fade": "0"})
+    timing = ET.SubElement(cue_part, qname(root, "CuePartPresetTiming"))
+    for _ in range(10):
+        ET.SubElement(timing, qname(root, "PresetTiming"))
+    cue.append(cue_part)
+    if template_cue is not None and "index" in template_cue.attrib:
+        cue.set("index", template_cue.get("index", "1"))
+    return cue
+
+
+def insert_cue_for_row(root: ET.Element, parent_map: dict[ET.Element, ET.Element], cue: ET.Element, row_index: int, rows: list[PartituraRow], cues_by_key: dict[str, ET.Element]) -> None:
+    parent = find_cue_parent(root)
+    insert_after: Optional[ET.Element] = None
+    for previous_index in range(row_index - 1, -1, -1):
+        previous_key = rows[previous_index].xml_key or f"__new_{previous_index}"
+        if previous_key in cues_by_key:
+            insert_after = cues_by_key[previous_key]
+            break
+    if insert_after is not None and parent_map.get(insert_after) is parent:
+        parent.insert(list(parent).index(insert_after) + 1, cue)
+    else:
+        cue_children = [child for child in parent if local_name(child.tag) == "Cue"]
+        if cue_children:
+            parent.insert(list(parent).index(cue_children[-1]) + 1, cue)
+        else:
+            parent.append(cue)
+
+
+def set_info(cue: ET.Element, value: str) -> None:
+    text = str(value or "").strip()
+    info_items = child_by_name(cue, "InfoItems")
+    if not text:
+        if info_items is not None:
+            cue.remove(info_items)
+        return
+    if info_items is None:
+        info_items = ET.Element(qname(cue, "InfoItems"))
+        cue.append(info_items)
+    info_node = child_by_name(info_items, "Info")
+    if info_node is None:
+        info_node = ET.Element(qname(cue, "Info"))
+        info_items.append(info_node)
+    info_node.text = text
+
+
+def set_command(cue: ET.Element, value: str) -> None:
+    text = str(value or "").strip()
+    command_node = None
+    for child in cue:
+        if local_name(child.tag) in {"Command", "Cmd", "CueCommand", "CLI", "CommandLine"}:
+            command_node = child
+            break
+    if not text:
+        if command_node is not None:
+            cue.remove(command_node)
+        return
+    if command_node is None:
+        command_node = ET.Element(qname(cue, "Command"))
+        cue.append(command_node)
+    command_node.text = text
+
+
+def update_cue_from_partitura_row(cue: ET.Element, row: PartituraRow) -> None:
+    number_node = child_by_name(cue, "Number")
+    if number_node is None:
+        number_node = ET.Element(qname(cue, "Number"))
+        cue.insert(0, number_node)
+    number, sub_number = split_cue_number(row.number)
+    number_node.set("number", number)
+    number_node.set("sub_number", sub_number)
+
+    trigger_node = child_by_name(cue, "Trigger")
+    if row.trigger or row.trigger_time:
+        if trigger_node is None:
+            trigger_node = ET.Element(qname(cue, "Trigger"))
+            cue.append(trigger_node)
+        trigger_node.set("type", row.trigger or "Go")
+        if row.trigger_time:
+            trigger_node.set("data_f", row.trigger_time)
+        elif "data_f" in trigger_node.attrib:
+            del trigger_node.attrib["data_f"]
+    elif trigger_node is not None:
+        cue.remove(trigger_node)
+
+    cue_part = first_index_zero_cue_part(cue)
+    if cue_part is None:
+        cue_part = ET.Element(qname(cue, "CuePart"), {"index": "0"})
+        cue.append(cue_part)
+    cue_part.set("name", row.name or "cue")
+    cue_part.set("basic_fade", row.fade or "0")
+    for attr, value in {"basic_downfade": row.downfade, "basic_delay": row.delay}.items():
+        if value:
+            cue_part.set(attr, value)
+        elif attr in cue_part.attrib:
+            del cue_part.attrib[attr]
+
+    set_info(cue, row.info)
+    set_command(cue, row.command)
+
+
+def renumber_cue_indices(root: ET.Element) -> None:
+    for parent in root.iter():
+        cue_index = 1
+        for child in parent:
+            if local_name(child.tag) != "Cue":
+                continue
+            if child.get("{http://www.w3.org/2001/XMLSchema-instance}nil") == "true":
+                continue
+            if child_by_name(child, "Number") is None:
+                continue
+            child.set("index", str(cue_index))
+            cue_index += 1
+
+
+def write_xml_preserving_preamble(tree: ET.ElementTree, source_path: Path, output_path: Path) -> None:
+    buffer = io.BytesIO()
+    tree.write(buffer, encoding="utf-8", xml_declaration=True)
+    content = buffer.getvalue()
+    preamble = []
+    try:
+        for raw_line in source_path.read_text(encoding="utf-8-sig").splitlines()[:10]:
+            stripped = raw_line.strip()
+            if stripped.startswith("<?xml-stylesheet"):
+                preamble.append(stripped)
+    except OSError:
+        preamble = []
+    if not preamble:
+        output_path.write_bytes(content)
+        return
+    lines = content.splitlines(keepends=True)
+    insert = "".join(f"{line}\n" for line in preamble).encode("utf-8")
+    if lines:
+        output_path.write_bytes(lines[0] + insert + b"".join(lines[1:]))
+    else:
+        output_path.write_bytes(insert + content)
+
+
+def save_partitura_to_show_xml(xml_path: Path, rows: list[PartituraRow], output_path: Path) -> None:
+    parser = ET.XMLParser(encoding="utf-8")
+    tree = ET.parse(xml_path, parser=parser)
+    root = tree.getroot()
+    namespace = root.tag.split("}", 1)[0][1:] if root.tag.startswith("{") else ""
+    if namespace:
+        ET.register_namespace("", namespace)
+    if root.attrib.get("{http://www.w3.org/2001/XMLSchema-instance}schemaLocation") is not None:
+        ET.register_namespace("xsi", "http://www.w3.org/2001/XMLSchema-instance")
+    parent_map = {child: parent for parent in root.iter() for child in parent}
+    cues_by_key = {key: cue for cue, key in iter_partitura_cues(root)}
+    all_cues_by_key = dict(cues_by_key)
+    used_keys: set[str] = set()
+    template_cue = next((cue for cue, _key in iter_partitura_cues(root)), None)
+    for row_index, row in enumerate(rows):
+        key = row.xml_key or f"__new_{row_index}"
+        cue = cues_by_key.get(row.xml_key or "")
+        if cue is None:
+            cue = create_empty_cue(root, template_cue)
+            insert_cue_for_row(root, parent_map, cue, row_index, rows, all_cues_by_key)
+            parent_map[cue] = find_cue_parent(root)
+            all_cues_by_key[key] = cue
+        else:
+            used_keys.add(row.xml_key or "")
+        update_cue_from_partitura_row(cue, row)
+    for key, cue in cues_by_key.items():
+        if key in used_keys:
+            continue
+        parent = parent_map.get(cue)
+        if parent is not None:
+            parent.remove(cue)
+    renumber_cue_indices(root)
+    ET.indent(tree, space="\t")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    write_xml_preserving_preamble(tree, xml_path, output_path)
 
 
 def find_photo_for_stem(stem: str, photo_dir: Path) -> Optional[Path]:
@@ -685,6 +1212,97 @@ def read_passport_rows_from_sheet(sheet, item_by_group: dict[tuple[str, str], Pr
         preset_no = item.preset_no if item else ""
         rows.append(PassportRow(preset_text, fixture_text, preset_no, None, description_text))
     return rows
+
+
+def partitura_row_to_dict(row: PartituraRow) -> dict:
+    data = {
+        "number": row.number,
+        "name": row.name,
+        "fade": row.fade,
+        "downfade": row.downfade,
+        "delay": row.delay,
+        "trigger": row.trigger,
+        "trigger_time": row.trigger_time,
+        "info": row.info,
+        "command": row.command,
+        "_xml_key": row.xml_key,
+    }
+    if row.original_name or row.original_info:
+        data["_translation_original"] = {"name": row.original_name, "info": row.original_info}
+    return data
+
+
+def partitura_row_from_dict(data: dict) -> PartituraRow:
+    original = data.get("_translation_original") or {}
+    return PartituraRow(
+        number=str(data.get("number", "")),
+        name=str(data.get("name", "")),
+        fade=str(data.get("fade", "")),
+        downfade=str(data.get("downfade", "")),
+        delay=str(data.get("delay", "")),
+        trigger=str(data.get("trigger", "")),
+        trigger_time=str(data.get("trigger_time", "")),
+        info=str(data.get("info", "")),
+        command=str(data.get("command", "")),
+        xml_key=str(data.get("_xml_key", "")),
+        original_name=str(original.get("name", "")),
+        original_info=str(original.get("info", "")),
+    )
+
+
+def write_partitura_state(project_dir: Path, rows: list[PartituraRow], translated: bool) -> None:
+    payload = {"translated": translated, "rows": [partitura_row_to_dict(row) for row in rows]}
+    partitura_state_path(project_dir).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def read_partitura_state(project_dir: Path) -> tuple[list[PartituraRow], bool]:
+    path = partitura_state_path(project_dir)
+    if not path.exists():
+        return [], False
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return [], False
+    return [partitura_row_from_dict(item) for item in payload.get("rows", []) if isinstance(item, dict)], bool(payload.get("translated"))
+
+
+def load_partitura_rows(project: Project) -> tuple[list[PartituraRow], bool]:
+    state_rows, translated = read_partitura_state(project.directory)
+    if state_rows:
+        parsed_by_key = {row.xml_key: row for row in parse_partitura(project.xml_path) if row.xml_key}
+        for row in state_rows:
+            if not row.xml_key:
+                continue
+            parsed = parsed_by_key.get(row.xml_key)
+            if parsed and not row.number:
+                row.number = parsed.number
+        return state_rows, translated
+    rows = parse_partitura(project.xml_path)
+    write_partitura_state(project.directory, rows, False)
+    return rows, False
+
+
+def rows_for_original_partitura(rows: list[PartituraRow], translated: bool) -> list[PartituraRow]:
+    if not translated:
+        return rows
+    result: list[PartituraRow] = []
+    for row in rows:
+        copy_row = PartituraRow(
+            row.number,
+            row.original_name or row.name,
+            row.fade,
+            row.downfade,
+            row.delay,
+            row.trigger,
+            row.trigger_time,
+            row.original_info or row.info,
+            row.command,
+            row.xml_key,
+            row.original_name,
+            row.original_info,
+        )
+        result.append(copy_row)
+    return result
 
 
 def load_passport_rows(items: list[PresetItem], project_dir: Path, title: str) -> tuple[list[PassportRow], Optional[str]]:
@@ -831,6 +1449,8 @@ class PassportApp(tk.Tk):
         self.project: Optional[Project] = None
         self.storage_mode = tk.StringVar(value="local")
         self.sftp_config = load_sftp_config()
+        self.yandex_config = load_yandex_config()
+        self.cloud_provider = tk.StringVar(value=self.sftp_config.provider if self.sftp_config.provider in {"sftp", "yandex_disk"} else "sftp")
         self.ssh_client: Optional[paramiko.SSHClient] = None
         self.cloud_session: Optional[paramiko.SFTPClient] = None
         self.remote_base_dir = ""
@@ -842,6 +1462,9 @@ class PassportApp(tk.Tk):
         self.mode = "start"
         self.items: list[PresetItem] = []
         self.rows: list[PassportRow] = []
+        self.current_remote_files: list[RemoteFile] = []
+        self.partitura_rows: list[PartituraRow] = []
+        self.partitura_translated = False
         self.partitura_fields = [PartituraField(f.field_id, f.title, f.enabled) for f in PARTITURA_DEFAULT_FIELDS]
         self.index = 0
         self.loading_description = False
@@ -1252,8 +1875,9 @@ class PassportApp(tk.Tk):
 
         bottom = tk.Frame(frame, bg=BLACK)
         bottom.grid(row=4, column=0, sticky="ew", padx=36, pady=(0, 28))
-        bottom.columnconfigure(0, weight=1)
-        ttk.Button(bottom, text="Создать партитуру", style="Yellow.TButton", command=self.create_partitura_files).grid(row=0, column=0, sticky="ew", ipady=10)
+        bottom.columnconfigure((0, 1), weight=1)
+        ttk.Button(bottom, text="Создать партитуру", style="Yellow.TButton", command=self.create_partitura_files).grid(row=0, column=0, sticky="ew", padx=(0, 8), ipady=10)
+        ttk.Button(bottom, text="Сохранить XML", style="Yellow.TButton", command=self.save_partitura_show_xml).grid(row=0, column=1, sticky="ew", padx=(8, 0), ipady=10)
 
     def _build_transfer_page(self) -> None:
         frame = self.frames["transfer"]
@@ -1295,7 +1919,8 @@ class PassportApp(tk.Tk):
         if self.storage_mode.get() == "remote":
             self.connection_settings_button.grid()
             if self.remote_connected:
-                self.storage_status.set("✓ подключено")
+                provider = "Яндекс.Диск" if self.cloud_provider.get() == "yandex_disk" else "SFTP"
+                self.storage_status.set(f"✓ {provider} подключено")
                 self.storage_status_label.configure(fg=GREEN)
             else:
                 self.storage_status.set("✕ нет подключения")
@@ -1310,7 +1935,11 @@ class PassportApp(tk.Tk):
             self.preset_setup_status.set(f"Проекты хранятся в {active_project_root()}")
 
     def try_connect_remote_on_start(self) -> None:
-        if not self.sftp_config.host or not self.sftp_config.username:
+        if self.cloud_provider.get() == "yandex_disk":
+            if not self.yandex_config.access_token:
+                self.update_storage_status()
+                return
+        elif not self.sftp_config.host or not self.sftp_config.username:
             self.update_storage_status()
             return
         self.show_transfer("Проверяю подключение к облаку...")
@@ -1348,6 +1977,13 @@ class PassportApp(tk.Tk):
         window.grab_set()
         window.columnconfigure(1, weight=1)
 
+        provider = tk.StringVar(value=self.cloud_provider.get())
+        tk.Label(window, text="Тип облака", bg=BLACK, fg=SILVER, font=("", 12, "bold")).grid(row=0, column=0, sticky="w", padx=18, pady=10)
+        provider_row = tk.Frame(window, bg=BLACK)
+        provider_row.grid(row=0, column=1, sticky="ew", padx=(0, 18), pady=10)
+        tk.Radiobutton(provider_row, text="SFTP", variable=provider, value="sftp", bg=BLACK, fg=SILVER, selectcolor=YELLOW, activebackground=BLACK, activeforeground=YELLOW).pack(side="left", padx=(0, 18))
+        tk.Radiobutton(provider_row, text="Яндекс.Диск", variable=provider, value="yandex_disk", bg=BLACK, fg=SILVER, selectcolor=YELLOW, activebackground=BLACK, activeforeground=YELLOW).pack(side="left")
+
         values = {
             "host": tk.StringVar(value=self.sftp_config.host),
             "port": tk.StringVar(value=str(self.sftp_config.port)),
@@ -1362,22 +1998,46 @@ class PassportApp(tk.Tk):
             ("Пароль", "password"),
             ("Папка", "remote_dir"),
         ]
-        for row, (label, key) in enumerate(labels):
+        for row, (label, key) in enumerate(labels, start=1):
             tk.Label(window, text=label, bg=BLACK, fg=SILVER, font=("", 12, "bold")).grid(row=row, column=0, sticky="w", padx=18, pady=10)
             entry = tk.Entry(window, textvariable=values[key], bg=PANEL, fg="white", insertbackground=YELLOW, relief="flat", show="*" if key == "password" else "")
             entry.grid(row=row, column=1, sticky="ew", padx=(0, 18), pady=10, ipady=7)
 
         status = tk.StringVar(value="")
         status_label = tk.Label(window, textvariable=status, bg=BLACK, fg=SILVER)
-        status_label.grid(row=len(labels), column=0, columnspan=2, sticky="w", padx=18, pady=(6, 0))
+        status_label.grid(row=len(labels) + 1, column=0, columnspan=2, sticky="w", padx=18, pady=(6, 0))
 
         def save_and_connect() -> None:
+            chosen = provider.get()
+            if chosen == "yandex_disk":
+                try:
+                    config = self.connect_yandex_via_code(window)
+                except Exception as exc:
+                    status.set(f"Ошибка: {exc}")
+                    status_label.configure(fg=RED)
+                    return
+                self.yandex_config = config
+                self.sftp_config.provider = "yandex_disk"
+                self.cloud_provider.set("yandex_disk")
+                save_cloud_config(self.sftp_config, self.yandex_config)
+                self.storage_mode.set("remote")
+                ok, error = self.connect_remote(self.sftp_config)
+                if ok:
+                    set_active_project_root(REMOTE_CACHE_ROOT)
+                    self.update_storage_status()
+                    window.destroy()
+                else:
+                    status.set(f"Ошибка: {error}")
+                    status_label.configure(fg=RED)
+                return
+
             try:
                 port = int(values["port"].get().strip() or "22")
             except ValueError:
                 messagebox.showerror(APP_TITLE, "Порт должен быть числом.", parent=window)
                 return
             config = SftpConfig(
+                provider="sftp",
                 host=values["host"].get().strip(),
                 port=port,
                 username=values["username"].get().strip(),
@@ -1391,8 +2051,9 @@ class PassportApp(tk.Tk):
             window.update_idletasks()
             ok, error = self.connect_remote(config)
             if ok:
-                save_sftp_config(config)
+                save_cloud_config(config, self.yandex_config)
                 self.sftp_config = config
+                self.cloud_provider.set("sftp")
                 self.storage_mode.set("remote")
                 set_active_project_root(REMOTE_CACHE_ROOT)
                 self.update_storage_status()
@@ -1402,13 +2063,47 @@ class PassportApp(tk.Tk):
                 status_label.configure(fg=RED)
 
         buttons = tk.Frame(window, bg=BLACK)
-        buttons.grid(row=len(labels) + 1, column=0, columnspan=2, sticky="ew", padx=18, pady=18)
+        buttons.grid(row=len(labels) + 2, column=0, columnspan=2, sticky="ew", padx=18, pady=18)
         buttons.columnconfigure((0, 1), weight=1)
         ttk.Button(buttons, text="Назад", style="Silver.TButton", command=window.destroy).grid(row=0, column=0, sticky="ew", padx=(0, 8), ipady=6)
         ttk.Button(buttons, text="Подключить и сохранить", style="Yellow.TButton", command=save_and_connect).grid(row=0, column=1, sticky="ew", padx=(8, 0), ipady=6)
 
+    def connect_yandex_via_code(self, parent) -> YandexDiskConfig:
+        client_id, client_secret = yandex_oauth_credentials()
+        if not client_id or not client_secret:
+            raise RuntimeError(f"Не найдены YANDEX_CLIENT_ID/YANDEX_CLIENT_SECRET в {WEB_ENV_PATH}")
+        scope = "cloud_api:disk.app_folder"
+        url = "https://oauth.yandex.ru/authorize?" + urllib.parse.urlencode(
+            {
+                "response_type": "code",
+                "client_id": client_id,
+                "redirect_uri": "https://oauth.yandex.ru/verification_code",
+                "scope": scope,
+                "force_confirm": "yes",
+            }
+        )
+        webbrowser.open(url)
+        code = simpledialog.askstring(APP_TITLE, "Яндекс открылся в браузере.\nСкопируйте код подтверждения и вставьте сюда:", parent=parent)
+        if not code:
+            raise RuntimeError("Код не введен.")
+        return yandex_exchange_code(code)
+
     def connect_remote(self, config: SftpConfig) -> tuple[bool, str]:
         self.close_remote()
+        if self.cloud_provider.get() == "yandex_disk" or config.provider == "yandex_disk":
+            try:
+                if not self.yandex_config.access_token:
+                    return False, "Яндекс.Диск не подключен"
+                yandex_ensure_dir(self.yandex_config.access_token, YANDEX_APP_ROOT)
+                if REMOTE_CACHE_ROOT.exists():
+                    shutil.rmtree(REMOTE_CACHE_ROOT)
+                yandex_download_project_index(self.yandex_config.access_token, REMOTE_CACHE_ROOT)
+                self.remote_base_dir = YANDEX_APP_ROOT
+                self.remote_connected = True
+                return True, ""
+            except Exception as exc:
+                self.remote_connected = False
+                return False, str(exc)
         ssh: Optional[paramiko.SSHClient] = None
         try:
             ssh = paramiko.SSHClient()
@@ -1459,6 +2154,22 @@ class PassportApp(tk.Tk):
         self.remote_connected = False
 
     def ensure_remote_ready(self) -> bool:
+        if self.cloud_provider.get() == "yandex_disk":
+            if self.remote_connected and self.yandex_config.access_token:
+                return True
+            if not self.yandex_config.access_token:
+                messagebox.showwarning(APP_TITLE, "Сначала подключите Яндекс.Диск.")
+                return False
+            ok, error = self.connect_remote(self.sftp_config)
+            if ok:
+                self.remote_connected = True
+                if self.storage_mode.get() == "remote":
+                    set_active_project_root(REMOTE_CACHE_ROOT)
+                self.update_storage_status()
+                return True
+            self.update_storage_status()
+            messagebox.showerror(APP_TITLE, f"Не удалось подключиться к Яндекс.Диску:\n{error}")
+            return False
         if self.remote_connected and self.cloud_session is not None:
             return True
         if not self.sftp_config.host:
@@ -1476,6 +2187,14 @@ class PassportApp(tk.Tk):
         return False
 
     def ensure_remote_ready_silent(self) -> bool:
+        if self.cloud_provider.get() == "yandex_disk":
+            if self.remote_connected and self.yandex_config.access_token:
+                return True
+            if not self.yandex_config.access_token:
+                return False
+            ok, _error = self.connect_remote(self.sftp_config)
+            self.remote_connected = ok
+            return ok
         if self.remote_connected and self.cloud_session is not None:
             return True
         if not self.sftp_config.host:
@@ -1485,10 +2204,13 @@ class PassportApp(tk.Tk):
         return ok
 
     def refresh_remote_cache(self) -> bool:
-        if not self.ensure_remote_ready() or self.cloud_session is None:
+        if not self.ensure_remote_ready():
             return False
         try:
-            download_sftp_project_index(self.cloud_session, self.remote_base_dir, REMOTE_CACHE_ROOT)
+            if self.cloud_provider.get() == "yandex_disk":
+                yandex_download_project_index(self.yandex_config.access_token, REMOTE_CACHE_ROOT)
+            elif self.cloud_session is not None:
+                download_sftp_project_index(self.cloud_session, self.remote_base_dir, REMOTE_CACHE_ROOT)
             return True
         except Exception as exc:
             self.remote_connected = False
@@ -1497,12 +2219,15 @@ class PassportApp(tk.Tk):
             return False
 
     def refresh_remote_project(self, project_name: str) -> Optional[Path]:
-        if not self.ensure_remote_ready() or self.cloud_session is None:
+        if not self.ensure_remote_ready():
             return None
-        remote_project = sftp_join(self.remote_base_dir, project_name)
         local_project = REMOTE_CACHE_ROOT / project_name
         try:
-            download_sftp_project_atomic(self.cloud_session, remote_project, local_project)
+            if self.cloud_provider.get() == "yandex_disk":
+                yandex_download_project_atomic(self.yandex_config.access_token, project_name, local_project)
+            elif self.cloud_session is not None:
+                remote_project = sftp_join(self.remote_base_dir, project_name)
+                download_sftp_project_atomic(self.cloud_session, remote_project, local_project)
             return local_project
         except Exception as exc:
             self.remote_connected = False
@@ -1510,10 +2235,56 @@ class PassportApp(tk.Tk):
             messagebox.showerror(APP_TITLE, f"Не удалось обновить проект из облака:\n{exc}")
             return None
 
+    def list_remote_project_files(self, project_name: str, mode: str) -> list[RemoteFile]:
+        suffixes = ["_пресеты.xlsx", "_пресеты.pdf"] if mode == "presets" else ["_партитура.xlsx", "_партитура.pdf", "_new.xml"]
+        if self.cloud_provider.get() == "yandex_disk":
+            if not self.yandex_config.access_token:
+                raise RuntimeError("Сначала подключите Яндекс.Диск.")
+            remote_project = yandex_project_path(project_name)
+            files = []
+            for item in yandex_list_dir(self.yandex_config.access_token, remote_project):
+                if item.get("type") != "file":
+                    continue
+                name = str(item.get("name") or "")
+                if any(name.endswith(suffix) for suffix in suffixes):
+                    files.append(RemoteFile(item.get("path") or f"{remote_project}/{name}", Path(name), int(item.get("size") or 0)))
+            return sorted(files, key=lambda file: str(file.relative_path).lower())
+        if self.cloud_session is None:
+            raise RuntimeError("SFTP-сессия не открыта.")
+        remote_project = sftp_join(self.remote_base_dir, project_name)
+        files = []
+        for item in self.cloud_session.listdir_attr(remote_project):
+            if stat.S_ISDIR(item.st_mode):
+                continue
+            if any(item.filename.endswith(suffix) for suffix in suffixes):
+                files.append(RemoteFile(sftp_join(remote_project, item.filename), Path(item.filename), int(item.st_size or 0)))
+        return sorted(files, key=lambda file: str(file.relative_path).lower())
+
+    def download_remote_file_to_cache(self, project_name: str, remote_file: RemoteFile) -> Path:
+        target = REMOTE_CACHE_ROOT / project_name / remote_file.relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if self.cloud_provider.get() == "yandex_disk":
+            if not self.yandex_config.access_token:
+                raise RuntimeError("Сначала подключите Яндекс.Диск.")
+            target.write_bytes(yandex_get_bytes(yandex_download_url(self.yandex_config.access_token, remote_file.remote_path)))
+            return target
+        if self.cloud_session is None:
+            raise RuntimeError("SFTP-сессия не открыта.")
+        self.cloud_session.get(remote_file.remote_path, str(target))
+        return target
+
     def upload_project_to_remote(self, project_dir: Path, ask_replace: bool = True) -> bool:
-        if not self.ensure_remote_ready() or self.cloud_session is None:
+        if not self.ensure_remote_ready():
             return False
         require_project_xml(project_dir)
+        if self.cloud_provider.get() == "yandex_disk":
+            exists = (REMOTE_CACHE_ROOT / project_dir.name).exists()
+            if exists and ask_replace and not messagebox.askyesno(APP_TITLE, "Такой проект уже есть в облаке. Заменить?"):
+                return False
+            yandex_upload_project(self.yandex_config.access_token, project_dir)
+            return True
+        if self.cloud_session is None:
+            return False
         remote_project = sftp_join(self.remote_base_dir, project_dir.name)
         exists = sftp_exists(self.cloud_session, remote_project)
         if exists:
@@ -1529,6 +2300,12 @@ class PassportApp(tk.Tk):
         progress: Optional[Callable[[int, int, str], None]] = None,
     ) -> None:
         require_project_xml(project_dir)
+        if self.cloud_provider.get() == "yandex_disk":
+            if not self.yandex_config.access_token:
+                raise RuntimeError("Сначала подключите Яндекс.Диск.")
+            yandex_upload_project(self.yandex_config.access_token, project_dir, progress=progress)
+            self.remote_connected = True
+            return
         config = self.sftp_config
         if not config.host or not config.username:
             raise RuntimeError("Сначала настройте подключение к облаку.")
@@ -1555,16 +2332,21 @@ class PassportApp(tk.Tk):
         mirror_project_to_remote_cache(project_dir)
 
     def download_project_from_remote(self, project_name: str, local_root: Path, ask_replace: bool = True) -> Optional[Path]:
-        if not self.ensure_remote_ready() or self.cloud_session is None:
-            return None
-        remote_project = sftp_join(self.remote_base_dir, project_name)
-        if not sftp_exists(self.cloud_session, remote_project):
-            messagebox.showerror(APP_TITLE, "В облаке проект не найден.")
+        if not self.ensure_remote_ready():
             return None
         local_project = local_root / project_name
         if local_project.exists():
             if ask_replace and not messagebox.askyesno(APP_TITLE, "Такой проект уже есть локально. Заменить?"):
                 return None
+        if self.cloud_provider.get() == "yandex_disk":
+            yandex_download_project_atomic(self.yandex_config.access_token, project_name, local_project)
+            return local_project
+        if self.cloud_session is None:
+            return None
+        remote_project = sftp_join(self.remote_base_dir, project_name)
+        if not sftp_exists(self.cloud_session, remote_project):
+            messagebox.showerror(APP_TITLE, "В облаке проект не найден.")
+            return None
         download_sftp_project_atomic(self.cloud_session, remote_project, local_project)
         return local_project
 
@@ -1574,6 +2356,13 @@ class PassportApp(tk.Tk):
         local_root: Path,
         progress: Optional[Callable[[int, int, str], None]] = None,
     ) -> Path:
+        if self.cloud_provider.get() == "yandex_disk":
+            if not self.yandex_config.access_token:
+                raise RuntimeError("Сначала подключите Яндекс.Диск.")
+            local_project = local_root / project_name
+            yandex_download_project_atomic(self.yandex_config.access_token, project_name, local_project, progress=progress)
+            self.remote_connected = True
+            return local_project
         config = self.sftp_config
         if not config.host or not config.username:
             raise RuntimeError("Сначала настройте подключение к облаку.")
@@ -1736,32 +2525,42 @@ class PassportApp(tk.Tk):
             else:
                 self.create_project_button.grid()
                 self.create_project_button.configure(state="normal")
-        self.projects = list_projects()
+        if self.storage_mode.get() == "remote":
+            self.projects = getattr(self, "remote_projects", [])
+        else:
+            self.projects = list_projects()
         self.project_listbox.delete(0, "end")
         for project in self.projects:
             self.project_listbox.insert("end", project.title)
         self.show_frame("project_list")
 
     def refresh_remote_cache_in_background(self, mode: str) -> None:
-        self.show_transfer("Обновляю список проектов в облаке...")
+        self.show_transfer("Получаю список проектов из облака...")
 
         def worker() -> None:
             try:
                 if not self.ensure_remote_ready_silent():
                     raise RuntimeError("Не удалось подключиться к облаку.")
-                if self.cloud_session is None:
+                if self.cloud_provider.get() == "yandex_disk":
+                    names = yandex_project_names(self.yandex_config.access_token)
+                elif self.cloud_session is None:
                     raise RuntimeError("SFTP-сессия не открыта.")
-                download_sftp_project_index(self.cloud_session, self.remote_base_dir, REMOTE_CACHE_ROOT)
-                self.after(0, lambda: self.on_remote_cache_done(True, mode, ""))
+                else:
+                    names = sftp_project_names(self.cloud_session, self.remote_base_dir)
+                self.after(0, lambda: self.on_remote_cache_done(True, mode, "", names))
             except Exception as exc:
-                self.after(0, lambda: self.on_remote_cache_done(False, mode, str(exc)))
+                self.after(0, lambda: self.on_remote_cache_done(False, mode, str(exc), []))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def on_remote_cache_done(self, ok: bool, mode: str, error: str) -> None:
+    def on_remote_cache_done(self, ok: bool, mode: str, error: str, names: list[str]) -> None:
         self.hide_transfer()
         self.update_storage_status()
         if ok:
+            self.remote_projects = [
+                Project(project_title_from_dir(REMOTE_CACHE_ROOT / name), REMOTE_CACHE_ROOT / name, REMOTE_CACHE_ROOT / name / f"{project_title_from_dir(REMOTE_CACHE_ROOT / name)}.xml")
+                for name in names
+            ]
             self.show_project_list(mode)
         else:
             messagebox.showerror(APP_TITLE, f"Не удалось обновить облако:\n{error}")
@@ -1844,6 +2643,7 @@ class PassportApp(tk.Tk):
             return
         if mode == "partitura":
             self.partitura_project_var.set(f"Активный проект: {self.project.title}")
+            self.load_partitura_state_for_project()
             self.show_partitura()
         else:
             self.open_preset_project(self.project)
@@ -1852,15 +2652,6 @@ class PassportApp(tk.Tk):
         project = self.selected_project()
         if not project:
             return
-        if self.storage_mode.get() == "remote":
-            refreshed = self.refresh_remote_project(project.directory.name)
-            if refreshed is None:
-                return
-            xml = project_xml_path(refreshed)
-            if xml is None:
-                messagebox.showerror(APP_TITLE, "В проекте не найден XML файл.")
-                return
-            project = Project(directory=refreshed, title=project_title_from_dir(refreshed), xml_path=xml)
         self.project = project
         self.show_files(self.project_list_mode)
 
@@ -1878,6 +2669,21 @@ class PassportApp(tk.Tk):
         if new_dir.exists() and new_dir != project.directory:
             messagebox.showerror(APP_TITLE, "Проект с таким названием уже есть.")
             return
+        if self.storage_mode.get() == "remote":
+            try:
+                old_name = project.directory.name
+                new_name = new_dir.name
+                if self.cloud_provider.get() == "yandex_disk":
+                    yandex_rename_project(self.yandex_config.access_token, old_name, new_name)
+                else:
+                    if not self.ensure_remote_ready_silent() or self.cloud_session is None:
+                        raise RuntimeError("Не удалось подключиться к облаку.")
+                    self.cloud_session.rename(sftp_join(self.remote_base_dir, old_name), sftp_join(self.remote_base_dir, new_name))
+                self.refresh_remote_cache_in_background(self.project_list_mode)
+            except Exception as exc:
+                messagebox.showerror(APP_TITLE, f"Не удалось переименовать в облаке:\n{exc}")
+            return
+        if project.directory != new_dir:
             project.directory.rename(new_dir)
         xml = project_xml_path(new_dir)
         if xml:
@@ -1887,6 +2693,12 @@ class PassportApp(tk.Tk):
         if self.storage_mode.get() == "remote" and self.cloud_session is not None:
             remove_sftp_path(self.cloud_session, sftp_join(self.remote_base_dir, project.directory.name))
             self.upload_project_to_remote(new_dir, ask_replace=False)
+        elif self.storage_mode.get() == "remote" and self.cloud_provider.get() == "yandex_disk":
+            try:
+                yandex_rename_project(self.yandex_config.access_token, project.directory.name, new_dir.name)
+                mirror_project_to_remote_cache(new_dir)
+            except Exception as exc:
+                messagebox.showerror(APP_TITLE, f"Не удалось переименовать в облаке:\n{exc}")
         self.show_project_list(self.project_list_mode)
 
     def delete_selected_project(self) -> None:
@@ -1894,9 +2706,19 @@ class PassportApp(tk.Tk):
         if not project:
             return
         if messagebox.askyesno(APP_TITLE, f"Удалить проект «{project.title}» целиком?"):
+            if self.storage_mode.get() == "remote":
+                try:
+                    if self.cloud_provider.get() == "yandex_disk":
+                        yandex_delete_project(self.yandex_config.access_token, project.directory.name)
+                    else:
+                        if not self.ensure_remote_ready_silent() or self.cloud_session is None:
+                            raise RuntimeError("Не удалось подключиться к облаку.")
+                        remove_sftp_path(self.cloud_session, sftp_join(self.remote_base_dir, project.directory.name))
+                except Exception as exc:
+                    messagebox.showerror(APP_TITLE, f"Не удалось удалить в облаке:\n{exc}")
+                self.refresh_remote_cache_in_background(self.project_list_mode)
+                return
             shutil.rmtree(project.directory)
-            if self.storage_mode.get() == "remote" and self.cloud_session is not None:
-                remove_sftp_path(self.cloud_session, sftp_join(self.remote_base_dir, project.directory.name))
             self.show_project_list(self.project_list_mode)
 
     def create_preset_project_from_xml(self) -> None:
@@ -1909,6 +2731,7 @@ class PassportApp(tk.Tk):
         if project:
             self.project = project
             self.partitura_project_var.set(f"Активный проект: {project.title}")
+            self.load_partitura_state_for_project()
             self.show_partitura()
 
     def create_project_from_xml_dialog(self) -> Optional[Project]:
@@ -1964,7 +2787,23 @@ class PassportApp(tk.Tk):
         self.files_title.set(f"Файлы: {self.project.title}")
         self.files_listbox.delete(0, "end")
         self.current_files = []
-        suffixes = ["_пресеты.xlsx", "_пресеты.pdf"] if mode == "presets" else ["_партитура.xlsx", "_партитура.pdf"]
+        self.current_remote_files = []
+        suffixes = ["_пресеты.xlsx", "_пресеты.pdf"] if mode == "presets" else ["_партитура.xlsx", "_партитура.pdf", "_new.xml"]
+        if self.storage_mode.get() == "remote":
+            try:
+                if not self.ensure_remote_ready_silent():
+                    raise RuntimeError("Не удалось подключиться к облаку.")
+                self.current_remote_files = self.list_remote_project_files(self.project.directory.name, mode)
+            except Exception as exc:
+                messagebox.showerror(APP_TITLE, f"Не удалось получить файлы из облака:\n{exc}")
+                return
+            for remote_file in self.current_remote_files:
+                label = str(remote_file.relative_path)
+                if remote_file.size:
+                    label += f"  ({readable_size(remote_file.size)})"
+                self.files_listbox.insert("end", label)
+            self.show_frame("files")
+            return
         for path in sorted(self.project.directory.iterdir(), key=lambda p: p.name.lower()):
             if path.is_file() and any(path.name.endswith(suffix) for suffix in suffixes):
                 self.current_files.append(path)
@@ -1985,9 +2824,21 @@ class PassportApp(tk.Tk):
         self.file_menu.tk_popup(event.x_root, event.y_root)
 
     def open_selected_file(self) -> None:
-        path = self.selected_file()
-        if path:
+        selection = self.files_listbox.curselection()
+        if not selection:
+            messagebox.showwarning(APP_TITLE, "Выберите файл.")
+            return
+        if self.storage_mode.get() == "remote" and self.project:
+            try:
+                remote_file = self.current_remote_files[selection[0]]
+                path = self.download_remote_file_to_cache(self.project.directory.name, remote_file)
+            except Exception as exc:
+                messagebox.showerror(APP_TITLE, f"Не удалось скачать файл:\n{exc}")
+                return
             open_path(path)
+            return
+        path = self.current_files[selection[0]]
+        open_path(path)
 
     def reveal_selected_file(self) -> None:
         path = self.selected_file()
@@ -2374,13 +3225,43 @@ class PassportApp(tk.Tk):
             messagebox.showwarning(APP_TITLE, "Включите хотя бы одно поле.")
             return
         try:
-            rows = parse_partitura(self.project.xml_path)
+            if not self.partitura_rows:
+                self.load_partitura_state_for_project()
+            rows = rows_for_original_partitura(self.partitura_rows, self.partitura_translated)
+            self.partitura_rows = rows
+            self.partitura_translated = False
             create_partitura_xlsx(rows, fields, partitura_xlsx_path(self.project.directory, self.project.title), self.project.title)
             create_partitura_pdf(rows, fields, partitura_pdf_path(self.project.directory, self.project.title), self.project.title)
+            write_partitura_state(self.project.directory, self.partitura_rows, False)
         except Exception as exc:
             messagebox.showerror(APP_TITLE, f"Не удалось создать партитуру:\n{exc}")
             return
         self.show_files("partitura")
+
+    def load_partitura_state_for_project(self) -> None:
+        if not self.project:
+            self.partitura_rows = []
+            self.partitura_translated = False
+            return
+        self.partitura_rows, self.partitura_translated = load_partitura_rows(self.project)
+        self.partitura_project_var.set(
+            f"Активный проект: {self.project.title}"
+        )
+
+    def save_partitura_show_xml(self) -> None:
+        if not self.project:
+            messagebox.showwarning(APP_TITLE, "Сначала выберите проект.")
+            return
+        try:
+            if not self.partitura_rows:
+                self.load_partitura_state_for_project()
+            write_partitura_state(self.project.directory, self.partitura_rows, self.partitura_translated)
+            output = partitura_new_xml_path(self.project.directory, self.project.title)
+            save_partitura_to_show_xml(self.project.xml_path, self.partitura_rows, output)
+            messagebox.showinfo(APP_TITLE, f"Создан файл: {output.name}")
+            self.show_files("partitura")
+        except Exception as exc:
+            messagebox.showerror(APP_TITLE, f"Не удалось сохранить show-файл:\n{exc}")
 
     def on_close(self) -> None:
         self.save_current_description()
@@ -2675,6 +3556,15 @@ def open_path(path: Path) -> None:
         os.startfile(path)  # type: ignore[attr-defined]
     else:
         subprocess.run(["xdg-open", str(path)], check=False)
+
+
+def readable_size(size: int) -> str:
+    value = float(size)
+    for unit in ("Б", "КБ", "МБ", "ГБ"):
+        if value < 1024 or unit == "ГБ":
+            return f"{value:.1f} {unit}" if unit != "Б" else f"{int(value)} {unit}"
+        value /= 1024
+    return f"{size} Б"
 
 
 def reveal_path(path: Path) -> None:

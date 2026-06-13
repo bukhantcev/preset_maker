@@ -280,36 +280,82 @@ struct SftpSettingsView: View {
     @State private var username = ""
     @State private var password = ""
     @State private var remoteDir = RemoteSFTPService.rootName
+    @State private var yandexCode = ""
+    @FocusState private var yandexCodeFocused: Bool
 
     var body: some View {
         NavigationStack {
-            VStack(alignment: .leading, spacing: 14) {
-                remoteField("SFTP сервер", text: $cloudURL)
-                    .keyboardType(.URL)
-                remoteField("Порт", text: $port)
-                    .keyboardType(.numberPad)
-                remoteField("Пользователь", text: $username)
-                SecureField("Пароль", text: $password)
-                    .padding(12)
-                    .background(Brand.panel)
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Brand.yellow, lineWidth: 1))
-                remoteField("Папка", text: $remoteDir)
-                AppButton("Подключить и сохранить") {
-                    let parsedPort = Int(port.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 22
-                    let cleanDir = remoteDir.trimmingCharacters(in: .whitespacesAndNewlines)
-                    store.saveRemoteSettings(RemoteServerSettings(
-                        remoteMode: true,
-                        url: cloudURL.trimmingCharacters(in: .whitespacesAndNewlines),
-                        port: parsedPort,
-                        username: username.trimmingCharacters(in: .whitespacesAndNewlines),
-                        password: password,
-                        remoteDir: cleanDir.isEmpty ? RemoteSFTPService.rootName : cleanDir
-                    ))
-                    dismiss()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text(store.remoteConnected ? "Облако подключено: \(store.cloudTitle())" : "Облако не подключено")
+                        .font(.headline.bold())
+                        .foregroundStyle(store.remoteConnected ? Color.green : Color.red)
+                    remoteField("SFTP сервер", text: $cloudURL)
+                        .keyboardType(.URL)
+                    remoteField("Порт", text: $port)
+                        .keyboardType(.numberPad)
+                    remoteField("Пользователь", text: $username)
+                    SecureField("Пароль", text: $password)
+                        .padding(12)
+                        .background(Brand.panel)
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Brand.yellow, lineWidth: 1))
+                    remoteField("Папка", text: $remoteDir)
+                    AppButton("Подключить и сохранить") {
+                        let parsedPort = Int(port.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 22
+                        let cleanDir = remoteDir.trimmingCharacters(in: .whitespacesAndNewlines)
+                        store.saveRemoteSettings(RemoteServerSettings(
+                            remoteMode: true,
+                            url: cloudURL.trimmingCharacters(in: .whitespacesAndNewlines),
+                            port: parsedPort,
+                            username: username.trimmingCharacters(in: .whitespacesAndNewlines),
+                            password: password,
+                            remoteDir: cleanDir.isEmpty ? RemoteSFTPService.rootName : cleanDir
+                        ))
+                        dismiss()
+                    }
+                    Divider().overlay(Brand.silverDark)
+                    Text("Яндекс.Диск")
+                        .font(.title3.bold())
+                        .foregroundStyle(Brand.yellow)
+                    AppButton("Открыть Яндекс") {
+                        do {
+                            UIApplication.shared.open(try RemoteSFTPService.yandexAuthorizeURL())
+                        } catch {
+                            store.errorText = error.localizedDescription
+                        }
+                    }
+                    HStack(spacing: 10) {
+                        TextField("Код Яндекса", text: $yandexCode)
+                            .textContentType(.oneTimeCode)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .keyboardType(.asciiCapable)
+                            .focused($yandexCodeFocused)
+                            .padding(12)
+                            .background(Brand.panel)
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Brand.yellow, lineWidth: 1))
+                        Button("Вставить") {
+                            if let value = UIPasteboard.general.string {
+                                yandexCode = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                            }
+                            yandexCodeFocused = false
+                        }
+                        .font(.headline.bold())
+                        .foregroundStyle(Brand.yellow)
+                        .padding(.horizontal, 14)
+                        .frame(minHeight: 48)
+                        .background(Brand.black)
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Brand.yellow, lineWidth: 2))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                    AppButton("Подключить Яндекс.Диск") {
+                        yandexCodeFocused = false
+                        store.connectYandexDisk(code: yandexCode)
+                        dismiss()
+                    }
                 }
-                Spacer()
+                .padding(24)
             }
-            .padding(24)
             .background(Brand.black.ignoresSafeArea())
             .foregroundStyle(Brand.text)
             .navigationTitle("Настройка облака")
@@ -317,6 +363,12 @@ struct SftpSettingsView: View {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Назад") { dismiss() }
                         .foregroundStyle(Brand.silver)
+                }
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Готово") {
+                        yandexCodeFocused = false
+                    }
                 }
             }
             .onAppear {
@@ -401,7 +453,20 @@ struct PartituraSetupView: View {
                     }
                 }
             }
-            AppButton("Создать партитуру") { store.createPartitura() }
+            HStack(spacing: 10) {
+                AppButton("Создать партитуру") { store.createPartitura() }
+                Button {
+                    store.savePartituraShowXml()
+                } label: {
+                    Text("XML")
+                        .font(.headline.bold())
+                        .frame(width: 70, height: 52)
+                }
+                .foregroundStyle(Brand.yellow)
+                .background(Brand.black)
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Brand.yellow, lineWidth: 2))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
             AppButton("Назад", service: true, action: back)
         }
         .padding(24)

@@ -52,8 +52,10 @@ final class AppStore: ObservableObject {
     init() {
         _ = try? passportsRoot()
         reloadProjects()
-        if !remoteSettings.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-           !remoteSettings.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if remoteSettings.provider == "yandex_disk", !remoteSettings.yandexAccessToken.isEmpty {
+            connectRemote(showLoading: false)
+        } else if !remoteSettings.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !remoteSettings.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             connectRemote(showLoading: false)
         }
     }
@@ -84,7 +86,11 @@ final class AppStore: ObservableObject {
             let root = try passportsRoot()
             let dirs = (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
             projects = dirs.compactMap { dir in
-                guard dir.hasDirectoryPath, let xml = findXml(in: dir) else { return nil }
+                guard dir.hasDirectoryPath else { return nil }
+                if remoteSettings.remoteMode {
+                    return Project(dir: dir, title: projectTitle(from: dir), xml: dir.appendingPathComponent("\(projectTitle(from: dir)).xml"))
+                }
+                guard let xml = findXml(in: dir) else { return nil }
                 return Project(dir: dir, title: projectTitle(from: dir), xml: xml)
             }.sorted { displayTitle($0.title) < displayTitle($1.title) }
             if selectedPartituraProject == nil {
@@ -98,7 +104,7 @@ final class AppStore: ObservableObject {
     func setRemoteMode(_ enabled: Bool) {
         remoteSettings.remoteMode = enabled
         RemoteSFTPService.saveSettings(remoteSettings)
-        remoteStatus = enabled ? (remoteConnected ? "✓ подключено" : "✕ нет подключения") : "Локально"
+        remoteStatus = enabled ? (remoteConnected ? "✓ \(cloudTitle()) подключено" : "✕ нет подключения") : "Локально"
         reloadProjects()
     }
 
@@ -134,7 +140,7 @@ final class AppStore: ObservableObject {
                     await MainActor.run {
                         self.remoteRootPath = root
                         self.remoteConnected = true
-                        self.remoteStatus = "✓ подключено"
+                        self.remoteStatus = "✓ \(self.cloudTitle()) подключено"
                         self.reloadProjects()
                         self.screen = .projectList(mode)
                     }
@@ -156,14 +162,54 @@ final class AppStore: ObservableObject {
     func saveRemoteSettings(_ settings: RemoteServerSettings) {
         remoteSettings = settings
         remoteSettings.remoteMode = true
+        remoteSettings.provider = "sftp"
         RemoteSFTPService.saveSettings(remoteSettings)
         connectRemote()
     }
 
+    func connectYandexDisk(code: String) {
+        let cleanCode = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanCode.isEmpty else {
+            errorText = "Введи код Яндекса"
+            return
+        }
+        screen = .loading("Подключаю Яндекс.Диск...")
+        Task {
+            do {
+                let token = try await RemoteSFTPService.exchangeYandexCode(cleanCode)
+                var settings = self.remoteSettings
+                settings.remoteMode = true
+                settings.provider = "yandex_disk"
+                settings.yandexAccessToken = token.accessToken
+                settings.yandexRefreshToken = token.refreshToken
+                RemoteSFTPService.saveSettings(settings)
+                await MainActor.run {
+                    self.remoteSettings = settings
+                    self.connectRemote()
+                }
+            } catch {
+                await MainActor.run {
+                    self.remoteConnected = false
+                    self.remoteStatus = "✕ нет подключения"
+                    self.errorText = "Яндекс.Диск: \(error.localizedDescription)"
+                    self.screen = .start
+                }
+            }
+        }
+    }
+
+    func cloudTitle() -> String {
+        remoteSettings.provider == "yandex_disk" ? "Яндекс.Диск" : "SFTP"
+    }
+
     func connectRemote(showLoading: Bool = true) {
         let settings = remoteSettings
-        guard !settings.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              !settings.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        if settings.provider == "yandex_disk" {
+            guard !settings.yandexAccessToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        } else {
+            guard !settings.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !settings.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        }
         if showLoading { screen = .loading("Подключаюсь к облаку...") }
         Task {
             do {
@@ -175,7 +221,7 @@ final class AppStore: ObservableObject {
                 await MainActor.run {
                     self.remoteRootPath = root
                     self.remoteConnected = true
-                    self.remoteStatus = "✓ подключено"
+                    self.remoteStatus = "✓ \(self.cloudTitle()) подключено"
                     self.reloadProjects()
                     if showLoading { self.screen = .start }
                 }
@@ -230,7 +276,7 @@ final class AppStore: ObservableObject {
                 }
                 await MainActor.run {
                     self.remoteConnected = true
-                    self.remoteStatus = "✓ подключено"
+                    self.remoteStatus = "✓ \(self.cloudTitle()) подключено"
                     self.reloadProjects()
                     if let selfProject = self.projectModeProject {
                         self.screen = .projectMode(selfProject)
@@ -260,6 +306,28 @@ final class AppStore: ObservableObject {
     }
 
     func openProjectFiles(_ project: Project, mode: ProjectMode) {
+        if projectModeCloud {
+            screen = .loading("Загружаю файлы проекта...")
+            let settings = remoteSettings
+            let projectName = project.dir.lastPathComponent
+            Task {
+                do {
+                    let dir = try await RemoteSFTPService.refreshProjectFiles(projectName, kind: mode == .partitura ? "partitura" : "presets", settings: settings)
+                    await MainActor.run {
+                        if mode == .partitura { self.selectedPartituraProject = Project(dir: dir, title: project.title, xml: project.xml) }
+                        self.filesProjectDir = dir
+                        self.lastFilesMode = mode
+                        self.screen = .projectFiles(mode)
+                    }
+                } catch {
+                    await MainActor.run {
+                        self.errorText = "Файлы: \(error.localizedDescription)"
+                        self.screen = .projectMode(project)
+                    }
+                }
+            }
+            return
+        }
         if mode == .partitura { selectedPartituraProject = project }
         filesProjectDir = project.dir
         lastFilesMode = mode
@@ -673,10 +741,30 @@ final class AppStore: ObservableObject {
         }
     }
 
+    func savePartituraShowXml() {
+        guard let project = selectedPartituraProject else {
+            errorText = "Выбери проект"
+            return
+        }
+        do {
+            let target = project.dir.appendingPathComponent("\(safe(project.title))_new.xml")
+            if FileManager.default.fileExists(atPath: target.path) {
+                try FileManager.default.removeItem(at: target)
+            }
+            try FileManager.default.copyItem(at: project.xml, to: target)
+            filesProjectDir = project.dir
+            selectedPartituraProject = project
+            lastFilesMode = .partitura
+            screen = .projectFiles(.partitura)
+        } catch {
+            errorText = "XML: \(error.localizedDescription)"
+        }
+    }
+
     func projectFiles(mode: ProjectMode) -> [URL] {
         let dir = filesProjectDir ?? (mode == .partitura ? selectedPartituraProject?.dir : projectDir)
         guard let dir else { return [] }
-        let suffixes = mode == .partitura ? ["_партитура.xlsx", "_партитура.pdf"] : ["_пресеты.xlsx", "_пресеты.pdf"]
+        let suffixes = mode == .partitura ? ["_партитура.xlsx", "_партитура.pdf", "_new.xml"] : ["_пресеты.xlsx", "_пресеты.pdf"]
         return ((try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [])
             .filter { file in suffixes.contains { file.lastPathComponent.hasSuffix($0) } }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }

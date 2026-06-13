@@ -28,5 +28,9 @@
 		<key>UIColorName</key>
 		<string></string>
 	</dict>
+	<key>YANDEX_CLIENT_ID</key>
+	<string>$(YANDEX_CLIENT_ID)</string>
+	<key>YANDEX_CLIENT_SECRET</key>
+	<string>$(YANDEX_CLIENT_SECRET)</string>
 </dict>
 </plist>

@@ -82,6 +82,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -176,10 +177,13 @@ public class MainActivity extends ComponentActivity {
     private final Object passportWriteLock = new Object();
     private boolean remoteMode = false;
     private boolean remoteConnected = false;
+    private String cloudProvider = "sftp";
     private String cloudUrl = "";
     private int cloudPort = 22;
     private String cloudUser = "";
     private String cloudPassword = "";
+    private String yandexAccessToken = "";
+    private String yandexRefreshToken = "";
     private String remoteBasePath = "";
     private TextView loadingText;
 
@@ -476,7 +480,8 @@ public class MainActivity extends ComponentActivity {
         panel.addView(row, new LinearLayout.LayoutParams(-1, -2));
 
         TextView status = new TextView(this);
-        status.setText(remoteMode ? (remoteConnected ? "✓ подключено" : "✕ нет подключения") : "Локально: Документы/MA2_passports");
+        String providerTitle = "yandex_disk".equals(cloudProvider) ? "Яндекс.Диск" : "SFTP";
+        status.setText(remoteMode ? (remoteConnected ? "✓ " + providerTitle + " подключено" : "✕ нет подключения") : "Локально: Документы/MA2_passports");
         status.setTextColor(remoteMode ? (remoteConnected ? BRAND_GREEN : BRAND_RED) : BRAND_SILVER);
         status.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         status.setPadding(0, dp(6), 0, 0);
@@ -634,10 +639,17 @@ public class MainActivity extends ComponentActivity {
             fields.addView(partituraFieldRow(i));
         }
 
+        LinearLayout actions = new LinearLayout(this);
+        actions.setOrientation(LinearLayout.HORIZONTAL);
         Button createButton = new Button(this);
         createButton.setText("Создать партитуру");
         createButton.setOnClickListener(v -> createPartituraFromSettings());
-        root.addView(createButton, new LinearLayout.LayoutParams(-1, -2));
+        actions.addView(createButton, new LinearLayout.LayoutParams(0, -2, 1));
+        Button xmlButton = new Button(this);
+        xmlButton.setText("XML");
+        xmlButton.setOnClickListener(v -> savePartituraShowXmlFromSettings());
+        actions.addView(xmlButton, new LinearLayout.LayoutParams(0, -2, 1));
+        root.addView(actions, new LinearLayout.LayoutParams(-1, -2));
 
         Button backButton = new Button(this);
         backButton.setText("Назад");
@@ -1283,7 +1295,7 @@ public class MainActivity extends ComponentActivity {
 
         try {
             File rootDir = projectBrowserCloud ? remoteCacheRootDir() : localPassportsRootDir();
-            File[] dirs = rootDir.listFiles(file -> file.isDirectory() && findProjectXml(file) != null);
+            File[] dirs = rootDir.listFiles(file -> file.isDirectory() && (projectBrowserCloud || findProjectXml(file) != null));
             if (dirs == null || dirs.length == 0) {
                 TextView empty = new TextView(this);
                 empty.setText(projectBrowserCloud ? "В облаке пока нет проектов" : "Пока нет проектов");
@@ -1524,7 +1536,7 @@ public class MainActivity extends ComponentActivity {
             showLoadingScreen("Обновляю файлы проекта...");
             cameraExecutor.execute(() -> {
                 try {
-                    File fresh = refreshRemoteProjectDir(dir.getName());
+                    File fresh = refreshRemoteProjectFiles(dir.getName(), kind);
                     runOnUiThread(() -> showProjectFilesScreenReady(fresh, kind));
                 } catch (Exception e) {
                     runOnUiThread(() -> {
@@ -1642,7 +1654,9 @@ public class MainActivity extends ComponentActivity {
             if (!file.isFile()) return false;
             String name = file.getName().toLowerCase(Locale.ROOT);
             if ("partitura".equals(kind)) {
-                return name.endsWith("_партитура.xlsx") || name.endsWith("_партитура.pdf");
+                return name.endsWith("_партитура.xlsx")
+                        || name.endsWith("_партитура.pdf")
+                        || name.endsWith("_new.xml");
             }
             return name.endsWith("_пресеты.xlsx") || name.endsWith("_пресеты.pdf");
         });
@@ -2149,26 +2163,37 @@ public class MainActivity extends ComponentActivity {
     private void loadServerSettings() {
         SharedPreferences prefs = getSharedPreferences("cloud", MODE_PRIVATE);
         remoteMode = prefs.getBoolean("remoteMode", false);
+        cloudProvider = prefs.getString("provider", "sftp");
         cloudUrl = prefs.getString("url", prefs.getString("host", ""));
         cloudPort = prefs.getInt("port", 22);
         cloudUser = prefs.getString("user", "");
         cloudPassword = prefs.getString("password", "");
+        yandexAccessToken = prefs.getString("yandexAccessToken", "");
+        yandexRefreshToken = prefs.getString("yandexRefreshToken", "");
         remoteBasePath = prefs.getString("remoteDir", REMOTE_ROOT_NAME);
     }
 
     private void saveServerSettings() {
         getSharedPreferences("cloud", MODE_PRIVATE).edit()
                 .putBoolean("remoteMode", remoteMode)
+                .putString("provider", cloudProvider)
                 .putString("url", cloudUrl)
                 .putInt("port", cloudPort)
                 .putString("user", cloudUser)
                 .putString("password", cloudPassword)
+                .putString("yandexAccessToken", yandexAccessToken)
+                .putString("yandexRefreshToken", yandexRefreshToken)
                 .putString("remoteDir", remoteBasePath == null || remoteBasePath.isEmpty() ? REMOTE_ROOT_NAME : remoteBasePath)
                 .apply();
     }
 
     private void tryConnectRemoteOnStart() {
-        if (cloudUrl == null || cloudUrl.trim().isEmpty() || cloudUser == null || cloudUser.trim().isEmpty()) {
+        if ("yandex_disk".equals(cloudProvider)) {
+            if (yandexAccessToken == null || yandexAccessToken.trim().isEmpty()) {
+                remoteConnected = false;
+                return;
+            }
+        } else if (cloudUrl == null || cloudUrl.trim().isEmpty() || cloudUser == null || cloudUser.trim().isEmpty()) {
             remoteConnected = false;
             return;
         }
@@ -2185,12 +2210,18 @@ public class MainActivity extends ComponentActivity {
         LinearLayout form = new LinearLayout(this);
         form.setOrientation(LinearLayout.VERTICAL);
         form.setPadding(dp(18), dp(10), dp(18), 0);
+        Button yandexButton = new Button(this);
+        yandexButton.setText("Подключить Яндекс.Диск");
+        Button sftpLabel = new Button(this);
+        sftpLabel.setText("SFTP");
         EditText host = dialogInput("SFTP сервер", cloudUrl);
         EditText port = dialogInput("Порт", String.valueOf(cloudPort));
         EditText user = dialogInput("Пользователь", cloudUser);
         EditText password = dialogInput("Пароль", cloudPassword);
         EditText remoteDir = dialogInput("Папка", remoteBasePath == null || remoteBasePath.isEmpty() ? REMOTE_ROOT_NAME : remoteBasePath);
         password.setInputType(0x00000081);
+        form.addView(yandexButton);
+        form.addView(sftpLabel);
         form.addView(host);
         form.addView(port);
         form.addView(user);
@@ -2202,7 +2233,9 @@ public class MainActivity extends ComponentActivity {
                 .setNegativeButton("Назад", null)
                 .setPositiveButton("Подключить и сохранить", null)
                 .create();
+        yandexButton.setOnClickListener(v -> connectYandexDialog(dialog));
         dialog.setOnShowListener(d -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            cloudProvider = "sftp";
             cloudUrl = host.getText().toString().trim();
             try {
                 cloudPort = Integer.parseInt(port.getText().toString().trim());
@@ -2231,6 +2264,80 @@ public class MainActivity extends ComponentActivity {
         dialog.show();
     }
 
+    private void connectYandexDialog(AlertDialog parentDialog) {
+        if (BuildConfig.YANDEX_CLIENT_ID == null || BuildConfig.YANDEX_CLIENT_ID.isEmpty()
+                || BuildConfig.YANDEX_CLIENT_SECRET == null || BuildConfig.YANDEX_CLIENT_SECRET.isEmpty()) {
+            Toast.makeText(this, "В сборке нет YANDEX_CLIENT_ID/YANDEX_CLIENT_SECRET", Toast.LENGTH_LONG).show();
+            return;
+        }
+        try {
+            String authUrl = "https://oauth.yandex.ru/authorize?"
+                    + "response_type=code"
+                    + "&client_id=" + URLEncoder.encode(BuildConfig.YANDEX_CLIENT_ID, "UTF-8")
+                    + "&redirect_uri=" + URLEncoder.encode("https://oauth.yandex.ru/verification_code", "UTF-8")
+                    + "&scope=" + URLEncoder.encode("cloud_api:disk.app_folder", "UTF-8")
+                    + "&force_confirm=yes";
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(authUrl)));
+        } catch (Exception e) {
+            Toast.makeText(this, "Yandex: " + e.getMessage(), Toast.LENGTH_LONG).show();
+            return;
+        }
+        EditText codeInput = dialogInput("Код подтверждения", "");
+        new AlertDialog.Builder(this)
+                .setTitle("Яндекс.Диск")
+                .setMessage("Скопируй код из браузера и вставь сюда.")
+                .setView(codeInput)
+                .setNegativeButton("Отмена", null)
+                .setPositiveButton("Подключить", (d, w) -> {
+                    String code = codeInput.getText().toString().trim();
+                    if (code.isEmpty()) return;
+                    showLoadingScreen("Подключаю Яндекс.Диск...");
+                    Executors.newSingleThreadExecutor().execute(() -> {
+                        try {
+                            JSONObject token = yandexExchangeCode(code);
+                            yandexAccessToken = token.optString("access_token", "");
+                            yandexRefreshToken = token.optString("refresh_token", "");
+                            if (yandexAccessToken.isEmpty()) throw new Exception("Yandex не вернул access_token");
+                            cloudProvider = "yandex_disk";
+                            remoteMode = true;
+                            saveServerSettings();
+                            yandexEnsureDir("app:/" + REMOTE_ROOT_NAME);
+                            refreshRemoteCache();
+                            runOnUiThread(() -> {
+                                if (parentDialog != null) parentDialog.dismiss();
+                                remoteConnected = true;
+                                showStartScreen();
+                                Toast.makeText(this, "Яндекс.Диск подключен", Toast.LENGTH_LONG).show();
+                            });
+                        } catch (Exception e) {
+                            runOnUiThread(() -> {
+                                remoteConnected = false;
+                                showStartScreen();
+                                Toast.makeText(this, "Яндекс.Диск: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                            });
+                        }
+                    });
+                })
+                .show();
+    }
+
+    private JSONObject yandexExchangeCode(String code) throws Exception {
+        String body = "grant_type=authorization_code"
+                + "&code=" + URLEncoder.encode(code, "UTF-8")
+                + "&client_id=" + URLEncoder.encode(BuildConfig.YANDEX_CLIENT_ID, "UTF-8")
+                + "&client_secret=" + URLEncoder.encode(BuildConfig.YANDEX_CLIENT_SECRET, "UTF-8");
+        byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+        HttpURLConnection conn = (HttpURLConnection) new URL("https://oauth.yandex.ru/token").openConnection();
+        conn.setRequestMethod("POST");
+        conn.setDoOutput(true);
+        conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
+        conn.getOutputStream().write(bytes);
+        int codeStatus = conn.getResponseCode();
+        String response = readHttp(conn);
+        if (codeStatus < 200 || codeStatus >= 300) throw new Exception("OAuth HTTP " + codeStatus + ": " + response);
+        return new JSONObject(response);
+    }
+
     private EditText dialogInput(String hint, String value) {
         EditText edit = new EditText(this);
         edit.setHint(hint);
@@ -2243,6 +2350,18 @@ public class MainActivity extends ComponentActivity {
 
     private boolean ensureRemoteReady() {
         if (!remoteMode) return true;
+        if ("yandex_disk".equals(cloudProvider)) {
+            if (remoteConnected && yandexAccessToken != null && !yandexAccessToken.isEmpty()) return true;
+            if (yandexAccessToken == null || yandexAccessToken.isEmpty()) return false;
+            try {
+                yandexEnsureDir("app:/" + REMOTE_ROOT_NAME);
+                remoteConnected = true;
+                return true;
+            } catch (Exception e) {
+                remoteConnected = false;
+                return false;
+            }
+        }
         if (remoteConnected) return true;
         if (cloudUrl.isEmpty() || cloudUser.isEmpty()) return false;
         try {
@@ -2258,6 +2377,18 @@ public class MainActivity extends ComponentActivity {
 
     private boolean refreshRemoteCache() {
         if (!remoteMode) return true;
+        if ("yandex_disk".equals(cloudProvider)) {
+            if (yandexAccessToken == null || yandexAccessToken.isEmpty()) return false;
+            try {
+                deleteRecursive(remoteCacheRootDir());
+                yandexDownloadProjectIndex(remoteCacheRootDir());
+                remoteConnected = true;
+                return true;
+            } catch (Exception e) {
+                remoteConnected = false;
+                return false;
+            }
+        }
         if (cloudUrl.isEmpty() || cloudUser.isEmpty()) return false;
         try {
             SftpHandle handle = openCloud();
@@ -2274,6 +2405,12 @@ public class MainActivity extends ComponentActivity {
 
     private File refreshRemoteProjectDir(String projectName) throws Exception {
         if (!remoteMode) return new File(remoteCacheRootDir(), projectName);
+        if ("yandex_disk".equals(cloudProvider)) {
+            File target = new File(remoteCacheRootDir(), projectName);
+            yandexDownloadProject(projectName, target, null);
+            remoteConnected = true;
+            return target;
+        }
         SftpHandle handle = openCloud();
         File target = new File(remoteCacheRootDir(), projectName);
         deleteRecursive(target);
@@ -2283,16 +2420,58 @@ public class MainActivity extends ComponentActivity {
         return target;
     }
 
+    private File refreshRemoteProjectFiles(String projectName, String kind) throws Exception {
+        File target = new File(remoteCacheRootDir(), projectName);
+        deleteRecursive(target);
+        if (!target.mkdirs()) throw new Exception("Не могу создать кэш проекта");
+        if ("yandex_disk".equals(cloudProvider)) {
+            JSONArray entries = yandexList(yandexProjectPath(projectName));
+            for (int i = 0; i < entries.length(); i++) {
+                JSONObject item = entries.optJSONObject(i);
+                if (item == null || !"file".equals(item.optString("type"))) continue;
+                String name = item.optString("name", "");
+                if (!isProjectOutputFile(name, kind)) continue;
+                yandexGetFile(yandexHref("resources/download", item.optString("path"), false), new File(target, name));
+            }
+            remoteConnected = true;
+            return target;
+        }
+        SftpHandle handle = openCloud();
+        try {
+            String remoteProject = sftpPath(remoteBasePath, projectName);
+            for (CloudEntry entry : listRemoteDir(handle.sftp, remoteProject)) {
+                if (entry.directory || !isProjectOutputFile(entry.name, kind)) continue;
+                handle.sftp.get(sftpPath(remoteProject, entry.name), new File(target, entry.name).getAbsolutePath());
+            }
+        } finally {
+            handle.close();
+        }
+        remoteConnected = true;
+        return target;
+    }
+
+    private boolean isProjectOutputFile(String name, String kind) {
+        String lower = name.toLowerCase(Locale.ROOT);
+        if ("partitura".equals(kind)) {
+            return lower.endsWith("_партитура.xlsx") || lower.endsWith("_партитура.pdf") || lower.endsWith("_new.xml");
+        }
+        return lower.endsWith("_пресеты.xlsx") || lower.endsWith("_пресеты.pdf");
+    }
+
     private void syncProjectToRemote(File dir) {
         if (!remoteMode || dir == null || !dir.exists()) return;
         Executors.newSingleThreadExecutor().execute(() -> {
             try {
                 requireProjectXml(dir);
-                SftpHandle handle = openCloud();
-                String remoteProject = sftpPath(remoteBasePath, dir.getName());
-                uploadRemoteDirAtomic(handle.sftp, dir, remoteProject, null);
-                handle.close();
-                mirrorProjectToRemoteCache(dir);
+                if ("yandex_disk".equals(cloudProvider)) {
+                    yandexUploadProject(dir, null);
+                } else {
+                    SftpHandle handle = openCloud();
+                    String remoteProject = sftpPath(remoteBasePath, dir.getName());
+                    uploadRemoteDirAtomic(handle.sftp, dir, remoteProject, null);
+                    handle.close();
+                    mirrorProjectToRemoteCache(dir);
+                }
                 remoteConnected = true;
             } catch (Exception ignored) {
                 remoteConnected = false;
@@ -2307,11 +2486,15 @@ public class MainActivity extends ComponentActivity {
             String error = "";
             try {
                 requireProjectXml(dir);
-                SftpHandle handle = openCloud();
-                String remoteProject = sftpPath(remoteBasePath, dir.getName());
-                uploadRemoteDirAtomic(handle.sftp, dir, remoteProject, (done, total, name) -> updateLoading("Загружаю " + done + "/" + total + ": " + name));
-                handle.close();
-                mirrorProjectToRemoteCache(dir);
+                if ("yandex_disk".equals(cloudProvider)) {
+                    yandexUploadProject(dir, (done, total, name) -> updateLoading("Загружаю " + done + "/" + total + ": " + name));
+                } else {
+                    SftpHandle handle = openCloud();
+                    String remoteProject = sftpPath(remoteBasePath, dir.getName());
+                    uploadRemoteDirAtomic(handle.sftp, dir, remoteProject, (done, total, name) -> updateLoading("Загружаю " + done + "/" + total + ": " + name));
+                    handle.close();
+                    mirrorProjectToRemoteCache(dir);
+                }
                 ok = true;
             } catch (Exception exc) {
                 error = exc.getMessage();
@@ -2368,10 +2551,14 @@ public class MainActivity extends ComponentActivity {
             String error = "";
             try {
                 if (projectBrowserCloud) {
-                    SftpHandle handle = openCloud();
                     if (replace) deleteRecursive(target);
-                    downloadRemoteDir(handle.sftp, sftpPath(remoteBasePath, sourceDir.getName()), target, (done, total, name) -> updateLoading("Скачиваю " + done + "/" + total + ": " + name));
-                    handle.close();
+                    if ("yandex_disk".equals(cloudProvider)) {
+                        yandexDownloadProject(sourceDir.getName(), target, (done, total, name) -> updateLoading("Скачиваю " + done + "/" + total + ": " + name));
+                    } else {
+                        SftpHandle handle = openCloud();
+                        downloadRemoteDir(handle.sftp, sftpPath(remoteBasePath, sourceDir.getName()), target, (done, total, name) -> updateLoading("Скачиваю " + done + "/" + total + ": " + name));
+                        handle.close();
+                    }
                 } else {
                     if (replace) deleteRecursive(target);
                     copyRecursive(sourceDir, target);
@@ -2399,9 +2586,13 @@ public class MainActivity extends ComponentActivity {
         if (!remoteMode || projectName == null) return;
         Executors.newSingleThreadExecutor().execute(() -> {
             try {
-                SftpHandle handle = openCloud();
-                removeRemoteTree(handle.sftp, sftpPath(remoteBasePath, projectName));
-                handle.close();
+                if ("yandex_disk".equals(cloudProvider)) {
+                    yandexDeleteProject(projectName);
+                } else {
+                    SftpHandle handle = openCloud();
+                    removeRemoteTree(handle.sftp, sftpPath(remoteBasePath, projectName));
+                    handle.close();
+                }
             } catch (Exception ignored) {
             }
         });
@@ -2440,6 +2631,162 @@ public class MainActivity extends ComponentActivity {
             try { sftp.disconnect(); } catch (Exception ignored) {}
             try { session.disconnect(); } catch (Exception ignored) {}
         }
+    }
+
+    private String readHttp(HttpURLConnection conn) throws Exception {
+        InputStream stream = conn.getResponseCode() >= 400 ? conn.getErrorStream() : conn.getInputStream();
+        if (stream == null) return "";
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        copy(stream, out);
+        return out.toString("UTF-8");
+    }
+
+    private JSONObject yandexJson(String method, String endpoint, String[][] params) throws Exception {
+        StringBuilder url = new StringBuilder("https://cloud-api.yandex.net/v1/disk/").append(endpoint);
+        if (params != null && params.length > 0) {
+            url.append("?");
+            for (int i = 0; i < params.length; i++) {
+                if (i > 0) url.append("&");
+                url.append(URLEncoder.encode(params[i][0], "UTF-8")).append("=")
+                        .append(URLEncoder.encode(params[i][1], "UTF-8"));
+            }
+        }
+        HttpURLConnection conn = (HttpURLConnection) new URL(url.toString()).openConnection();
+        conn.setRequestMethod(method);
+        conn.setRequestProperty("Authorization", "OAuth " + yandexAccessToken);
+        int status = conn.getResponseCode();
+        String body = readHttp(conn);
+        if (status != 200 && status != 201 && status != 202 && status != 204 && status != 409) {
+            throw new Exception("Yandex HTTP " + status + ": " + body);
+        }
+        return body.isEmpty() ? new JSONObject() : new JSONObject(body);
+    }
+
+    private void yandexEnsureDir(String diskPath) throws Exception {
+        String clean = diskPath.replace("app:/", "");
+        String current = "app:";
+        for (String part : clean.split("/")) {
+            if (part.isEmpty()) continue;
+            current = current + "/" + part;
+            yandexJson("PUT", "resources", new String[][]{{"path", current}});
+        }
+    }
+
+    private String yandexProjectPath(String projectName) {
+        return "app:/" + REMOTE_ROOT_NAME + "/" + projectName;
+    }
+
+    private JSONArray yandexList(String diskPath) throws Exception {
+        JSONObject json = yandexJson("GET", "resources", new String[][]{{"path", diskPath}, {"limit", "1000"}});
+        JSONObject embedded = json.optJSONObject("_embedded");
+        return embedded == null ? new JSONArray() : embedded.optJSONArray("items") == null ? new JSONArray() : embedded.optJSONArray("items");
+    }
+
+    private String yandexHref(String endpoint, String diskPath, boolean overwrite) throws Exception {
+        JSONObject json = yandexJson("GET", endpoint, overwrite
+                ? new String[][]{{"path", diskPath}, {"overwrite", "true"}}
+                : new String[][]{{"path", diskPath}});
+        String href = json.optString("href", "");
+        if (href.isEmpty()) throw new Exception("Yandex не вернул href");
+        return href;
+    }
+
+    private void yandexPutFile(String href, File file) throws Exception {
+        HttpURLConnection conn = (HttpURLConnection) new URL(href).openConnection();
+        conn.setRequestMethod("PUT");
+        conn.setDoOutput(true);
+        copy(new FileInputStream(file), conn.getOutputStream());
+        int status = conn.getResponseCode();
+        if (status < 200 || status >= 300) throw new Exception("Upload HTTP " + status + ": " + readHttp(conn));
+    }
+
+    private void yandexGetFile(String href, File file) throws Exception {
+        HttpURLConnection conn = (HttpURLConnection) new URL(href).openConnection();
+        int status = conn.getResponseCode();
+        if (status < 200 || status >= 300) throw new Exception("Download HTTP " + status + ": " + readHttp(conn));
+        File parent = file.getParentFile();
+        if (parent != null && !parent.exists()) parent.mkdirs();
+        copy(conn.getInputStream(), file);
+    }
+
+    private void yandexUploadProject(File dir, TransferProgress progress) throws Exception {
+        requireProjectXml(dir);
+        String remoteProject = yandexProjectPath(dir.getName());
+        yandexEnsureDir(remoteProject);
+        ArrayList<File> files = localProjectFiles(dir);
+        for (int i = 0; i < files.size(); i++) {
+            File file = files.get(i);
+            String relative = dir.toPath().relativize(file.toPath()).toString().replace("\\", "/");
+            if (progress != null) progress.onProgress(i + 1, files.size(), relative);
+            if (relative.contains("/")) {
+                yandexEnsureDir(remoteProject + "/" + relative.substring(0, relative.lastIndexOf('/')));
+            }
+            yandexPutFile(yandexHref("resources/upload", remoteProject + "/" + relative, true), file);
+        }
+        mirrorProjectToRemoteCache(dir);
+    }
+
+    private void yandexDownloadProjectIndex(File localRoot) throws Exception {
+        deleteRecursive(localRoot);
+        if (!localRoot.exists()) localRoot.mkdirs();
+        yandexEnsureDir("app:/" + REMOTE_ROOT_NAME);
+        JSONArray projects = yandexList("app:/" + REMOTE_ROOT_NAME);
+        for (int i = 0; i < projects.length(); i++) {
+            JSONObject project = projects.optJSONObject(i);
+            if (project == null || !"dir".equals(project.optString("type"))) continue;
+            String name = project.optString("name", "");
+            String path = project.optString("path", yandexProjectPath(name));
+            boolean hasXml = false;
+            JSONArray entries = yandexList(path);
+            for (int e = 0; e < entries.length(); e++) {
+                JSONObject item = entries.optJSONObject(e);
+                if (item != null && "file".equals(item.optString("type")) && item.optString("name").toLowerCase(Locale.ROOT).endsWith(".xml")) {
+                    hasXml = true;
+                }
+            }
+            if (!hasXml) continue;
+            File localProject = new File(localRoot, name);
+            if (!localProject.exists()) localProject.mkdirs();
+        }
+    }
+
+    private ArrayList<RemoteFile> yandexCollectFiles(String diskPath, String relative) throws Exception {
+        ArrayList<RemoteFile> files = new ArrayList<>();
+        JSONArray entries = yandexList(diskPath);
+        for (int i = 0; i < entries.length(); i++) {
+            JSONObject item = entries.optJSONObject(i);
+            if (item == null) continue;
+            String name = item.optString("name", "");
+            String itemPath = item.optString("path", diskPath + "/" + name);
+            String childRelative = relative.isEmpty() ? name : relative + "/" + name;
+            if ("dir".equals(item.optString("type"))) files.addAll(yandexCollectFiles(itemPath, childRelative));
+            else if ("file".equals(item.optString("type"))) files.add(new RemoteFile(itemPath, childRelative));
+        }
+        return files;
+    }
+
+    private void yandexDownloadProject(String projectName, File target, TransferProgress progress) throws Exception {
+        ArrayList<RemoteFile> files = yandexCollectFiles(yandexProjectPath(projectName), "");
+        File temp = new File(target.getParentFile(), "." + target.getName() + ".download");
+        deleteRecursive(temp);
+        if (!temp.mkdirs()) throw new Exception("Не могу создать " + temp.getAbsolutePath());
+        try {
+            for (int i = 0; i < files.size(); i++) {
+                RemoteFile file = files.get(i);
+                if (progress != null) progress.onProgress(i + 1, files.size(), file.relativePath);
+                yandexGetFile(yandexHref("resources/download", file.remotePath, false), new File(temp, file.relativePath));
+            }
+            if (findProjectXml(temp) == null) throw new Exception("В скачанном проекте нет XML");
+            deleteRecursive(target);
+            if (!temp.renameTo(target)) throw new Exception("Не могу заменить проект");
+        } catch (Exception e) {
+            deleteRecursive(temp);
+            throw e;
+        }
+    }
+
+    private void yandexDeleteProject(String projectName) throws Exception {
+        yandexJson("DELETE", "resources", new String[][]{{"path", yandexProjectPath(projectName)}, {"permanently", "true"}});
     }
 
     private SftpHandle openCloud() throws Exception {
@@ -2616,10 +2963,6 @@ public class MainActivity extends ComponentActivity {
             if (!hasXml) continue;
             File localProject = new File(localRoot, project.name);
             if (!localProject.exists()) localProject.mkdirs();
-            for (CloudEntry entry : listRemoteDir(sftp, remoteProject)) {
-                if (entry.directory) continue;
-                sftp.get(sftpPath(remoteProject, entry.name), new File(localProject, entry.name).getAbsolutePath());
-            }
         }
     }
 
@@ -3376,6 +3719,21 @@ public class MainActivity extends ComponentActivity {
             showProjectFilesScreen(selectedPartituraProjectDir, "partitura");
         } catch (Exception e) {
             Toast.makeText(this, "Партитура: " + e.getMessage(), Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void savePartituraShowXmlFromSettings() {
+        try {
+            if (selectedPartituraProjectDir == null) throw new Exception("Выбери проект");
+            File xml = findProjectXml(selectedPartituraProjectDir);
+            if (xml == null) throw new Exception("XML не найден");
+            String title = projectTitleFromDir(selectedPartituraProjectDir);
+            File output = new File(selectedPartituraProjectDir, safe(title) + "_new.xml");
+            copy(new FileInputStream(xml), output);
+            Toast.makeText(this, "Создан show-файл: " + output.getName(), Toast.LENGTH_LONG).show();
+            showProjectFilesScreen(selectedPartituraProjectDir, "partitura");
+        } catch (Exception e) {
+            Toast.makeText(this, "Show XML: " + e.getMessage(), Toast.LENGTH_LONG).show();
         }
     }
 

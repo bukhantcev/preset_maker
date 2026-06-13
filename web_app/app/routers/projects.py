@@ -7,6 +7,7 @@ import shutil
 import json
 import httpx
 import paramiko
+import uuid
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from .. import database, models
@@ -139,8 +140,7 @@ def write_passport_state(project_dir: Path, data: dict) -> None:
             "photoName": row_photo_name(row),
             "description": row.get("description", "")
         })
-    with open(project_dir / "passport_state.json", "w", encoding="utf-8") as f:
-        json.dump({"rows": state_rows}, f, ensure_ascii=False, indent=2)
+    atomic_write_json(project_dir / "passport_state.json", {"rows": state_rows})
 
 def read_passport_state(project_dir: Path) -> list[PassportRow]:
     state_path = project_dir / "passport_state.json"
@@ -165,9 +165,15 @@ def read_passport_state(project_dir: Path) -> list[PassportRow]:
     return rows
 
 def write_project_json(project_dir: Path, data: dict) -> None:
-    with open(project_dir / "project.json", "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    atomic_write_json(project_dir / "project.json", data)
     write_passport_state(project_dir, data)
+
+def atomic_write_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    with open(temp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    temp_path.replace(path)
 
 def build_project_data(project_dir: Path, project_name: str) -> dict:
     base_name = project_base_name(project_name)
@@ -178,39 +184,13 @@ def build_project_data(project_dir: Path, project_name: str) -> dict:
     items = parse_grandma2_presets(xml_path)
     state_rows = read_passport_state(project_dir)
     if state_rows:
-        has_table = any(project_dir.glob("*_пресеты.xlsx"))
-        table_rows, _ = load_passport_rows(items, project_dir, base_name) if has_table else ([], None)
-        table_by_occurrence = {}
-        table_counts = {}
-        for table_row in table_rows:
-            key = (table_row.preset_label, table_row.fixture_id)
-            occurrence = table_counts.get(key, 0)
-            table_counts[key] = occurrence + 1
-            table_by_occurrence[(key, occurrence)] = table_row
-
         item_by_group = {(item.preset_label, item.fixture_id): item for item in items}
         rows = []
-        used_table_rows = set()
-        state_counts = {}
         for row in state_rows:
             item = item_by_group.get((row.preset_label, row.fixture_id))
             if item and not row.preset_no:
                 row.preset_no = item.preset_no
-            key = (row.preset_label, row.fixture_id)
-            occurrence = state_counts.get(key, 0)
-            state_counts[key] = occurrence + 1
-            table_row = table_by_occurrence.get((key, occurrence))
-            if table_row:
-                row.description = table_row.description
-                used_table_rows.add((key, occurrence))
             rows.append(row)
-        table_counts.clear()
-        for table_row in table_rows:
-            key = (table_row.preset_label, table_row.fixture_id)
-            occurrence = table_counts.get(key, 0)
-            table_counts[key] = occurrence + 1
-            if (key, occurrence) not in used_table_rows and (table_row.photo_path or table_row.description):
-                rows.append(table_row)
         existing = {(row.preset_label, row.fixture_id) for row in rows}
         for item in items:
             if (item.preset_label, item.fixture_id) not in existing:
@@ -280,50 +260,13 @@ def load_project_data(project_dir: Path, project_name: str) -> dict:
             data["xml_file"] = xml_path.name
             items = parse_grandma2_presets(xml_path)
             item_by_group = {(item.preset_label, item.fixture_id): item for item in items}
-            table_files = list(project_dir.glob("*_пресеты.xlsx"))
-            table_mtime = max((p.stat().st_mtime for p in table_files), default=0)
-            json_mtime = json_path.stat().st_mtime
-            import_table_values = table_mtime > json_mtime
-            has_table = bool(table_files)
-            table_rows, _ = load_passport_rows(items, project_dir, data["title"]) if has_table else ([], None)
-            table_counts = {}
-            table_by_occurrence = {}
-            for table_row in table_rows:
-                key = (table_row.preset_label, table_row.fixture_id)
-                occurrence = table_counts.get(key, 0)
-                table_counts[key] = occurrence + 1
-                table_by_occurrence[(key, occurrence)] = table_row
-
-            json_counts = {}
-            used_table_rows = set()
             for row in data.get("rows", []):
                 key = (row.get("preset_label", ""), row.get("fixture_id", ""))
                 item = item_by_group.get(key)
                 if item and not row.get("preset_no"):
                     row["preset_no"] = item.preset_no
-                occurrence = json_counts.get(key, 0)
-                json_counts[key] = occurrence + 1
-                table_row = table_by_occurrence.get((key, occurrence))
-                if table_row:
-                    if import_table_values or "description" not in row:
-                        row["description"] = table_row.description
-                    if table_row.photo_path and (import_table_values or "photo_path" not in row):
-                        row["photo_path"] = str(table_row.photo_path)
-                    used_table_rows.add((key, occurrence))
-
-            table_counts.clear()
-            for table_row in table_rows:
-                key = (table_row.preset_label, table_row.fixture_id)
-                occurrence = table_counts.get(key, 0)
-                table_counts[key] = occurrence + 1
-                if (key, occurrence) not in used_table_rows and (table_row.photo_path or table_row.description):
-                    data.setdefault("rows", []).append({
-                        "preset_label": table_row.preset_label,
-                        "fixture_id": table_row.fixture_id,
-                        "preset_no": table_row.preset_no,
-                        "photo_path": str(table_row.photo_path) if table_row.photo_path else "",
-                        "description": table_row.description
-                    })
+                row.setdefault("description", "")
+                row.setdefault("photo_path", "")
 
             existing = {(row.get("preset_label", ""), row.get("fixture_id", "")) for row in data.get("rows", [])}
             for item in items:

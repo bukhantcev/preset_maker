@@ -72,9 +72,15 @@
     </details>
     {% elif user.storage_mode == 'yandex_disk' %}
     <div class="provider-actions">
-        <a href="/auth/yandex/disk_connect" class="btn-yellow">
-            {% if user.yandex_manual_token or user.yandex_disk_token %}Переподключить{% else %}Подключить{% endif %}
-        </a>
+        {% if user.yandex_manual_token or user.yandex_disk_token %}
+            <a href="/auth/yandex/disk_connect" class="btn-yellow">Переподключить</a>
+            <a href="/auth/yandex/disk_connect?switch=1" class="btn-silver">Сменить диск</a>
+            <form action="/settings/yandex_disconnect" method="post" onsubmit="return confirm('Отключить Яндекс.Диск? Проекты в облаке не удалятся.');">
+                <button type="submit" class="btn-danger">Отключить диск</button>
+            </form>
+        {% else %}
+            <a href="/auth/yandex/disk_connect" class="btn-yellow">Подключить</a>
+        {% endif %}
     </div>
     {% endif %}
 </section>
@@ -204,10 +210,18 @@
     }
     .provider-actions {
         display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
         border: 1px solid var(--line);
         border-radius: var(--radius);
         background: #080808;
         padding: 12px;
+    }
+    .provider-actions form { margin: 0; }
+    .provider-actions > * {
+        width: 100%;
+        min-width: 0;
+        white-space: normal;
     }
     @media (max-width: 760px) {
         .storage-grid {
@@ -215,6 +229,9 @@
         }
         .storage-card {
             min-height: 86px;
+        }
+        .provider-actions {
+            grid-template-columns: 1fr;
         }
     }
 </style>

@@ -149,18 +149,27 @@ async def auth_yandex_callback(request: Request, db: Session = Depends(database.
     return RedirectResponse(url="/", status_code=303)
 
 @router.get("/yandex/disk_connect")
-async def yandex_disk_connect(request: Request):
+async def yandex_disk_connect(request: Request, switch: int = 0, db: Session = Depends(database.get_db)):
     if not config_data['YANDEX_CLIENT_ID']:
         return Response("Ключи Yandex не настроены.", media_type="text/plain")
+    if switch:
+        user_data = request.session.get("user")
+        if user_data:
+            user = db.query(models.User).filter(models.User.id == user_data["id"]).first()
+            if user:
+                user.yandex_manual_token = None
+                user.yandex_disk_token = None
+                db.commit()
     redirect_uri = request.url_for('auth_yandex_disk_callback')
     redirect_uri = str(redirect_uri).replace('http://', 'https://')
     print(f"YANDEX_DISK_REDIRECT_URI={redirect_uri}", flush=True)
-    return await oauth.yandex.authorize_redirect(
-        request,
-        redirect_uri,
-        scope='cloud_api:disk.app_folder',
-        force_confirm='yes',
-    )
+    params = {
+        "scope": "cloud_api:disk.app_folder",
+        "force_confirm": "yes",
+    }
+    if switch:
+        params["prompt"] = "select_account"
+    return await oauth.yandex.authorize_redirect(request, redirect_uri, **params)
 
 @router.get("/yandex/disk_callback")
 async def auth_yandex_disk_callback(request: Request, db: Session = Depends(database.get_db)):

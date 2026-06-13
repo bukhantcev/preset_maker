@@ -125,6 +125,16 @@ async def update_yandex_token(request: Request, token: str = Form(...), db: Sess
     db.commit()
     return RedirectResponse(url="/settings", status_code=303)
 
+@router.post("/yandex_disconnect")
+async def disconnect_yandex_disk(request: Request, db: Session = Depends(database.get_db)):
+    user = get_current_user(request, db)
+    user.yandex_manual_token = None
+    user.yandex_disk_token = None
+    if user.storage_mode == "yandex_disk":
+        user.storage_mode = "temp"
+    db.commit()
+    return RedirectResponse(url="/settings?msg=Яндекс.Диск%20отключен", status_code=303)
+
 @router.post("/sftp")
 async def update_sftp_config(
     request: Request, 

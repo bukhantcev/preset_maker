@@ -12,6 +12,7 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.Rect;
 import android.graphics.Typeface;
@@ -26,6 +27,7 @@ import android.os.Environment;
 import android.provider.Settings;
 import android.text.Editable;
 import android.text.TextWatcher;
+import android.util.Log;
 import android.util.Size;
 import android.view.DragEvent;
 import android.view.Gravity;
@@ -55,6 +57,7 @@ import androidx.camera.core.CameraSelector;
 import androidx.camera.core.ImageCapture;
 import androidx.camera.core.ImageCaptureException;
 import androidx.camera.core.Preview;
+import androidx.exifinterface.media.ExifInterface;
 import androidx.camera.lifecycle.ProcessCameraProvider;
 import androidx.camera.view.PreviewView;
 import androidx.core.app.ActivityCompat;
@@ -3233,6 +3236,59 @@ public class MainActivity extends ComponentActivity {
         }
     }
 
+    private void normalizePhotoFile(File file) {
+        if (file == null || !file.exists()) return;
+        try {
+            ExifInterface exif = new ExifInterface(file.getAbsolutePath());
+            int orientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL);
+            Matrix matrix = new Matrix();
+            switch (orientation) {
+                case ExifInterface.ORIENTATION_ROTATE_90:
+                    matrix.postRotate(90);
+                    break;
+                case ExifInterface.ORIENTATION_ROTATE_180:
+                    matrix.postRotate(180);
+                    break;
+                case ExifInterface.ORIENTATION_ROTATE_270:
+                    matrix.postRotate(270);
+                    break;
+                case ExifInterface.ORIENTATION_FLIP_HORIZONTAL:
+                    matrix.postScale(-1, 1);
+                    break;
+                case ExifInterface.ORIENTATION_FLIP_VERTICAL:
+                    matrix.postScale(1, -1);
+                    break;
+                case ExifInterface.ORIENTATION_TRANSPOSE:
+                    matrix.postScale(-1, 1);
+                    matrix.postRotate(90);
+                    break;
+                case ExifInterface.ORIENTATION_TRANSVERSE:
+                    matrix.postScale(-1, 1);
+                    matrix.postRotate(270);
+                    break;
+                default:
+                    return;
+            }
+
+            Bitmap bitmap = BitmapFactory.decodeFile(file.getAbsolutePath());
+            if (bitmap == null) return;
+            Bitmap normalized = Bitmap.createBitmap(bitmap, 0, 0, bitmap.getWidth(), bitmap.getHeight(), matrix, true);
+            try (FileOutputStream out = new FileOutputStream(file, false)) {
+                normalized.compress(Bitmap.CompressFormat.JPEG, 90, out);
+            }
+            if (normalized != bitmap) normalized.recycle();
+            bitmap.recycle();
+
+            ExifInterface cleanExif = new ExifInterface(file.getAbsolutePath());
+            cleanExif.setAttribute(ExifInterface.TAG_ORIENTATION, String.valueOf(ExifInterface.ORIENTATION_NORMAL));
+            cleanExif.saveAttributes();
+        } catch (Exception e) {
+            Log.w("PassportCreator", "Photo orientation normalize error", e);
+        } catch (OutOfMemoryError e) {
+            Log.w("PassportCreator", "Photo orientation normalize OOM", e);
+        }
+    }
+
     private void saveCapturedPhotoAndReturn() {
         runOnUiThread(() -> {
             takingPhoto = false;
@@ -3569,6 +3625,7 @@ public class MainActivity extends ComponentActivity {
             if (row.photoFile != null && row.photoFile.exists()) row.photoFile.delete();
             if (target.exists()) target.delete();
             copy(new FileInputStream(tempPhoto), target);
+            normalizePhotoFile(target);
             row.photoFile = target;
             row.skipped = false;
             tempPhoto.delete();
@@ -3601,6 +3658,7 @@ public class MainActivity extends ComponentActivity {
             if (row.photoFile != null && row.photoFile.exists()) row.photoFile.delete();
             if (target.exists()) target.delete();
             copy(getContentResolver().openInputStream(uri), target);
+            normalizePhotoFile(target);
             row.photoFile = target;
             row.skipped = false;
             refreshOne(index);

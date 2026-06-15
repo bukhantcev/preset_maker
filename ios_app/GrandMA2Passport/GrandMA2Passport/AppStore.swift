@@ -648,7 +648,7 @@ final class AppStore: ObservableObject {
             let presetPart = row.presetNo.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? row.presetLabel : row.presetNo
             let name = uniquePhotoName(base: "\(safe(presetPart))_\(safe(row.fixtureId))", photosDir: photosDir)
             let url = photosDir.appendingPathComponent(name)
-            guard let data = image.jpegData(compressionQuality: 0.9) else { return }
+            guard let data = image.normalizedForPassport().jpegData(compressionQuality: 0.9) else { return }
             try data.write(to: url)
             rows[currentIndex].photoName = name
             pendingPhoto = nil
@@ -826,6 +826,18 @@ final class AppStore: ObservableObject {
             }
         default:
             screen = .start
+        }
+    }
+}
+
+private extension UIImage {
+    func normalizedForPassport() -> UIImage {
+        guard imageOrientation != .up else { return self }
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = scale
+        format.opaque = true
+        return UIGraphicsImageRenderer(size: size, format: format).image { _ in
+            draw(in: CGRect(origin: .zero, size: size))
         }
     }
 }
